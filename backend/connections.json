@@ -1,0 +1,18 @@
+{
+  "connections": [
+    {
+      "id": "conn-1774974745443-3bc3d2",
+      "patientWallet": "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f",
+      "doctorWallet": "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
+      "patientName": "Rajesh Kumar",
+      "doctorName": "Doctor",
+      "status": "CONNECTED",
+      "requestedAt": "2026-03-31T16:32:25.444Z",
+      "connectedAt": "2026-03-31T16:32:32.568Z",
+      "txHash": "0xf58d713616c2ffd1fccbd04394ffb4620d2fabb8ced5c4c2e4e2a7a65e82b64d"
+    }
+  ],
+  "appointments": [],
+  "records": [],
+  "prescriptions": []
+}

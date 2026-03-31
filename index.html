@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Decentralized Medical Vault</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+              mono: ['JetBrains Mono', 'monospace'],
+            },
+            colors: {
+              vault: {
+                black: 'var(--vault-black)',
+                dark: 'var(--vault-dark)',
+                card: 'var(--vault-card)',
+                border: 'var(--vault-border)',
+                primary: '#0EA5E9', // Sky 500
+                accent: '#3B82F6', // Blue 500
+                success: '#10B981',
+                alert: '#EF4444',
+              }
+            },
+            animation: {
+              'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'float': 'float 6s ease-in-out infinite',
+              'grid-flow': 'gridFlow 20s linear infinite',
+              'scan': 'scan 8s ease-in-out infinite',
+            },
+            keyframes: {
+              float: {
+                '0%, 100%': { transform: 'translateY(0)' },
+                '50%': { transform: 'translateY(-20px)' },
+              },
+              gridFlow: {
+                '0%': { transform: 'translateY(0)' },
+                '100%': { transform: 'translateY(40px)' },
+              },
+              scan: {
+                '0%': { top: '-20%', opacity: 0 },
+                '15%': { opacity: 1 },
+                '85%': { opacity: 1 },
+                '100%': { top: '120%', opacity: 0 },
+              }
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      :root {
+        /* Default to Light Mode Colors */
+        --vault-black: #ffffff;
+        --vault-dark: #f3f4f6;
+        --vault-card: #ffffff;
+        --vault-border: #e5e7eb;
+        --grid-color: rgba(0, 0, 0, 0.05);
+        --text-main: #111827;
+        --text-muted: #6b7280;
+      }
+      .dark {
+        --vault-black: #050505;
+        --vault-dark: #0A0A0A;
+        --vault-card: #121212;
+        --vault-border: #1E1E1E;
+        --grid-color: rgba(255, 255, 255, 0.05);
+        --text-main: #f9fafb;
+        --text-muted: #9ca3af;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        background-color: var(--vault-black);
+        color: var(--text-main);
+        transition: background-color 0.3s, color 0.3s;
+      }
+      .grid-bg {
+        background-size: 40px 40px;
+        background-image:
+          linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
+          linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
+        mask-image: radial-gradient(circle at center, black 40%, transparent 100%);
+        -webkit-mask-image: radial-gradient(circle at center, black 40%, transparent 100%);
+      }
+      /* Custom Scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--vault-dark); 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #ccc; 
+        border-radius: 4px;
+      }
+      .dark ::-webkit-scrollbar-thumb {
+        background: #333;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #bbb; 
+      }
+      .dark ::-webkit-scrollbar-thumb:hover {
+        background: #444;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "recharts": "https://esm.sh/recharts@^3.6.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
