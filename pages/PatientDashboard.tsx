@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
     FileText, Upload, Lock, Share2, Stethoscope, Eye, ShieldCheck,
     Database, TrendingUp, Sparkles, QrCode, Bell, Shield, Activity,
@@ -12,44 +12,16 @@ import {
 import { DOCTORS } from "../services/doctor";
 import { useToast } from "../context/ToastContext";
 import { useTheme } from "../context/ThemeContext";
+import { API_BASE_URL } from "../services/apiConfig";
 import DocumentViewerModal from "../components/DocumentViewerModal";
-import { PatientAccessPanel } from "../pages/Walletconnect";
+import ManageAccessPanel from "../components/ManageAccessPanel";
+import { PatientAccessPanel } from "./Walletconnect";
+import FabricAuditPanel from "../components/FabricAuditPanel";
+import InsuranceClaimsPanel from "../components/InsuranceClaimsPanel";
+import NotificationBell from "../components/ui/NotificationBell";
 import { MedicalRecord, Appointment, UserRole, AccessLog } from "../types";
-import { ethers } from "ethers";
-import { uploadFileToIPFS, hashFileSHA256, isRealCid } from "../services/ipfsService";
 
-// ─── Contract config ──────────────────────────────────────────────────────────
-const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
-const CONTRACT_ABI: string[] = [
-    "function addRecord(string memory _cid, string memory _name) public",
-    "function setDoctorAccess(address _doctor, bool _status) public",
-    "function getRecords(address _patient) public view returns (tuple(string ipfsCid, string fileName, uint256 timestamp, address owner)[])",
-    "function authorizedDoctors(address, address) public view returns (bool)",
-];
-const ANVIL_CHAIN_ID = "0x7a69";
-
-async function switchToAnvil() {
-    try {
-        await window.ethereum.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: ANVIL_CHAIN_ID }],
-        });
-    } catch (switchErr: any) {
-        if (switchErr.code === 4902) {
-            await window.ethereum.request({
-                method: "wallet_addEthereumChain",
-                params: [{
-                    chainId: ANVIL_CHAIN_ID,
-                    chainName: "Anvil Local",
-                    rpcUrls: ["http://127.0.0.1:8545"],
-                    nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-                }],
-            });
-        } else { throw switchErr; }
-    }
-}
-
-// ─── Lazy imports OUTSIDE component (stable references, never re-created) ─────
+// ─── Lazy imports OUTSIDE component (critical — never inside render) ──────────
 const HealthTrends   = React.lazy(() => import("../components/HealthTrends").catch(() => ({ default: () => <p className="p-6 text-red-500">HealthTrends failed to load</p> })));
 const SymptomChecker = React.lazy(() => import("../components/SymptomChecker").catch(() => ({ default: () => <p className="p-6 text-red-500">SymptomChecker failed to load</p> })));
 const PrescriptionQR = React.lazy(() => import("../components/PrescriptionQRPanel").catch(() => ({ default: () => <p className="p-6 text-red-500">PrescriptionQR failed to load</p> })));
@@ -57,9 +29,9 @@ const RecordExpiry   = React.lazy(() => import("../components/RecordExpiry").cat
 const Telemedicine   = React.lazy(() => import("../components/Telemedicine").catch(() => ({ default: () => <p className="p-6 text-red-500">Telemedicine failed to load</p> })));
 const SettingsPanel  = React.lazy(() => import("../components/SettingsPanel").catch(() => ({ default: () => <p className="p-6 text-red-500">Settings failed to load</p> })));
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 type Tab = "OVERVIEW" | "VAULT" | "ACCESS" | "BOOK" | "TRENDS" | "AI" |
-    "PRESCRIPTIONS" | "AUDIT" | "TELE" | "ALERTS" | "SETTINGS";
+    "PRESCRIPTIONS" | "AUDIT" | "TELE" | "ALERTS" | "SETTINGS" | "CLAIMS";
 
 // ─── Theme helpers ────────────────────────────────────────────────────────────
 const card = (d: boolean) => d ? "bg-[#0f0f0f] border-white/[0.08]" : "bg-white border-gray-200 shadow-sm";
@@ -67,7 +39,7 @@ const tx   = (d: boolean) => d ? "text-white"    : "text-gray-900";
 const t2   = (d: boolean) => d ? "text-gray-400" : "text-gray-500";
 const dv   = (d: boolean) => d ? "border-white/[0.08]" : "border-gray-100";
 
-// ─── Chart.js loader ──────────────────────────────────────────────────────────
+// ─── Chart.js loader ─────────────────────────────────────────────────────────
 function loadChartJs(): Promise<void> {
     return new Promise(resolve => {
         if ((window as any).Chart) { resolve(); return; }
@@ -79,14 +51,20 @@ function loadChartJs(): Promise<void> {
     });
 }
 
-// ─── Live vitals hook — ISOLATED so its state changes don't bubble up ─────────
+// ─── File utilities ───────────────────────────────────────────────────────────
+
+
+// IPFS handled by dedicated service
+import { uploadEncryptedMedicalFile, listMedicalRecords, isRealCid } from "../services/ipfsService";
+
+// ─── Live vitals hook ─────────────────────────────────────────────────────────
 function useLiveVitals() {
-    const [hr,   setHr]   = useState(72);
-    const [spo2, setSpo2] = useState(99);
-    const [sys,  setSys]  = useState(120);
-    const [hrH,  setHrH]  = useState<number[]>(() => Array.from({ length: 30 }, (_, i) => 70 + Math.round(Math.sin(i * 0.3) * 5)));
-    const [spH,  setSpH]  = useState<number[]>(() => Array.from({ length: 30 }, () => 98 + Math.round(Math.random())));
-    const [lbls, setLbls] = useState<string[]>(() => Array.from({ length: 30 }, (_, i) => `-${30 - i}s`));
+    const [hr, setHr]           = useState(72);
+    const [spo2, setSpo2]       = useState(99);
+    const [sys, setSys]         = useState(120);
+    const [hrH, setHrH]         = useState<number[]>(() => Array.from({ length: 30 }, (_, i) => 70 + Math.round(Math.sin(i * 0.3) * 5)));
+    const [spH, setSpH]         = useState<number[]>(() => Array.from({ length: 30 }, () => 98 + Math.round(Math.random())));
+    const [lbls, setLbls]       = useState<string[]>(() => Array.from({ length: 30 }, (_, i) => `-${30 - i}s`));
 
     useEffect(() => {
         const iv = setInterval(() => {
@@ -150,10 +128,34 @@ const LiveChart: React.FC<{ hrH: number[]; spH: number[]; lbls: string[]; dark: 
     return <canvas ref={canvasRef} />;
 };
 
-// ─── Audit trail ──────────────────────────────────────────────────────────────
+// ─── Stable Suspense wrapper ─────────────────────────────────────────────────
+// IMPORTANT: this component must live OUTSIDE PatientDashboard.
+// PatientDashboard re-renders every second because of live vitals. If Sub is
+// declared inside PatientDashboard, React treats it as a new component type on
+// every render and remounts the prescription panel, which closes its modal.
+const SubPage: React.FC<{
+    children: React.ReactNode;
+    dark: boolean;
+    tab: Tab;
+}> = ({ children, dark, tab }) => (
+    <React.Suspense fallback={
+        <div className={`flex items-center justify-center py-20 text-sm ${t2(dark)}`}>
+            <RefreshCw size={16} className="animate-spin mr-2" /> Loading…
+        </div>
+    }>
+        <div
+            className={`border rounded-xl ${tab === "SETTINGS" ? "overflow-hidden" : "p-6"} ${card(dark)}`}
+            style={tab === "SETTINGS" ? { minHeight: 600 } : {}}
+        >
+            {children}
+        </div>
+    </React.Suspense>
+);
+
+// ─── Audit trail (inline — avoids import failures) ────────────────────────────
 const AuditTrail: React.FC<{ dark: boolean }> = ({ dark }) => {
     const { addToast } = useToast();
-    const logs = MOCK_ACCESS_LOGS as AccessLog[];
+    const logs = MOCK_ACCESS_LOGS as unknown as AccessLog[];
     const [filter, setFilter] = useState<"ALL" | "GRANTED" | "REVOKED" | "ACCESSED">("ALL");
     const filtered = filter === "ALL" ? logs : logs.filter(l => l.action === filter);
 
@@ -178,6 +180,7 @@ const AuditTrail: React.FC<{ dark: boolean }> = ({ dark }) => {
                     <Download size={13} /> Export PDF
                 </button>
             </div>
+
             <div className="flex gap-2 mb-5 flex-wrap">
                 {(["ALL", "GRANTED", "ACCESSED", "REVOKED"] as const).map(f => (
                     <button key={f} onClick={() => setFilter(f)}
@@ -186,6 +189,7 @@ const AuditTrail: React.FC<{ dark: boolean }> = ({ dark }) => {
                     </button>
                 ))}
             </div>
+
             {filtered.length === 0
                 ? <div className={`text-center py-12 ${t2(dark)}`}><ShieldCheck className="w-10 h-10 mx-auto mb-3 opacity-20" /><p className="text-sm">No events found.</p></div>
                 : <div className="relative">
@@ -205,14 +209,24 @@ const AuditTrail: React.FC<{ dark: boolean }> = ({ dark }) => {
                                             {log.action === "GRANTED" ? "Access granted" : log.action === "REVOKED" ? "Access revoked" : "Records accessed"}
                                         </span>
                                     </div>
+                                    {log.recordsAccessed && log.recordsAccessed.length > 0 && (
+                                        <div className={`mt-2 pt-2 border-t ${dv(dark)}`}>
+                                            <p className={`text-xs mb-1 ${t2(dark)}`}>Records accessed:</p>
+                                            <div className="flex flex-wrap gap-1">
+                                                {log.recordsAccessed.map(r => (
+                                                    <span key={r} className="text-[10px] bg-sky-50 text-sky-600 border border-sky-200 px-2 py-0.5 rounded-full">{r}</span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                     {log.txHash && (
                                         <div className={`mt-2 flex items-center gap-1.5 pt-2 border-t ${dv(dark)}`}>
                                             <Lock size={10} className={t2(dark)} />
                                             <span className={`text-[10px] font-mono truncate flex-1 ${t2(dark)}`}>{log.txHash}</span>
                                             <button onClick={() => { navigator.clipboard.writeText(log.txHash || ""); addToast("success", "Hash copied."); }}
-                                                    className={`flex-shrink-0 ${t2(dark)} hover:text-sky-500`}><Copy size={11} /></button>
+                                                    className={`flex-shrink-0 ${t2(dark)} hover:text-sky-500 transition-colors`}><Copy size={11} /></button>
                                             <a href={`https://polygonscan.com/tx/${log.txHash}`} target="_blank" rel="noreferrer"
-                                               className={`flex-shrink-0 ${t2(dark)} hover:text-sky-500`}><ExternalLink size={11} /></a>
+                                               className={`flex-shrink-0 ${t2(dark)} hover:text-sky-500 transition-colors`}><ExternalLink size={11} /></a>
                                         </div>
                                     )}
                                 </div>
@@ -225,136 +239,171 @@ const AuditTrail: React.FC<{ dark: boolean }> = ({ dark }) => {
     );
 };
 
-// ─── KEY FIX: Memoized prescription tab so vitals re-renders don't remount it ─
-// This component is defined OUTSIDE PatientDashboard so it has a stable
-// reference and React never treats it as a new component type.
-const PrescriptionsTab = React.memo(({ patientWallet }: { patientWallet: string }) => (
-    <React.Suspense fallback={
-        <div className="flex items-center justify-center py-20 text-sm text-gray-400">
-            <RefreshCw size={16} className="animate-spin mr-2" /> Loading…
-        </div>
-    }>
-        <PrescriptionQR role="PATIENT" patientWallet={patientWallet} />
-    </React.Suspense>
-));
+// ─── Access manager (inline) ──────────────────────────────────────────────────
+const AccessManager: React.FC<{ dark: boolean; patientWallet: string }> = ({ dark, patientWallet }) => {
+    const { addToast } = useToast();
+    const [access,  setAccess]  = useState<Record<string, boolean>>({});
+    const [pending, setPending] = useState<Record<string, boolean>>({});
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MAIN PATIENT DASHBOARD
-// ═══════════════════════════════════════════════════════════════════════════════
+    const toggle = async (docId: string, docName: string, grant: boolean) => {
+        setPending(p => ({ ...p, [docId]: true }));
+        await new Promise(r => setTimeout(r, 1200));
+        try {
+            await fetch(`${API_BASE_URL}/${grant ? "grant-access" : "revoke-access"}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ patientWallet, doctorId: docId }),
+            });
+        } catch { /* backend offline */ }
+        setAccess(p  => ({ ...p, [docId]: grant }));
+        setPending(p => ({ ...p, [docId]: false }));
+        addToast(grant ? "success" : "info", grant ? `Access granted to ${docName}` : `Access revoked for ${docName}`);
+    };
+
+    return (
+        <div>
+            <div className="mb-6">
+                <h2 className={`font-bold text-lg ${tx(dark)}`}>Doctor Access Control</h2>
+                <p className={`text-xs mt-0.5 ${t2(dark)}`}>Grant or revoke access to your encrypted records. All changes are logged on-chain.</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {(DOCTORS as any[]).map(doc => (
+                    <div key={doc.id} className={`border rounded-xl p-5 transition-all ${card(dark)}`}>
+                        <div className="flex items-start gap-3 mb-3">
+                            <div className="w-11 h-11 rounded-full bg-teal-500/10 flex items-center justify-center text-sm font-bold text-teal-500 flex-shrink-0">
+                                {doc.name.split(" ").filter(Boolean).slice(-2).map((n: string) => n[0]).join("")}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <h3 className={`text-sm font-semibold ${tx(dark)}`}>{doc.name}</h3>
+                                <p className={`text-xs ${t2(dark)}`}>{doc.specialization}</p>
+                                <p className={`text-[10px] truncate ${t2(dark)}`}>{doc.hospital}</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-0.5">
+                                {[1, 2, 3, 4, 5].map(s => (
+                                    <span key={s} className={`text-xs ${s <= Math.round(doc.rating ?? 0) ? "text-amber-400" : dark ? "text-gray-700" : "text-gray-300"}`}>★</span>
+                                ))}
+                                <span className={`text-xs ml-1 ${t2(dark)}`}>{doc.rating}</span>
+                            </div>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${doc.available ? "text-green-600 bg-green-50" : "text-gray-400 bg-gray-100"}`}>
+                                {doc.available ? "● Available" : "○ Busy"}
+                            </span>
+                        </div>
+                        <div className={`text-[10px] font-mono p-2 rounded-lg mb-3 truncate ${dark ? "bg-white/5 text-gray-500" : "bg-gray-50 text-gray-400 border border-gray-100"}`}>
+                            {doc.walletAddress || `0x${doc.id.replace("doc_", "").padEnd(40, "0")}`}
+                        </div>
+                        {access[doc.id]
+                            ? <button onClick={() => toggle(doc.id, doc.name, false)} disabled={pending[doc.id]}
+                                      className={`w-full py-2 rounded-lg text-xs font-semibold border transition-all disabled:opacity-50 flex items-center justify-center gap-1.5 ${dark ? "bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20" : "bg-red-50 text-red-500 border-red-200 hover:bg-red-100"}`}>
+                                {pending[doc.id] ? <><RefreshCw size={11} className="animate-spin" />Writing to chain…</> : "Revoke Access"}
+                            </button>
+                            : <button onClick={() => toggle(doc.id, doc.name, true)} disabled={pending[doc.id]}
+                                      className={`w-full py-2 rounded-lg text-xs font-semibold border transition-all disabled:opacity-50 flex items-center justify-center gap-1.5 ${dark ? "bg-sky-500/10 text-sky-400 border-sky-500/20 hover:bg-sky-500/20" : "bg-sky-50 text-sky-500 border-sky-200 hover:bg-sky-100"}`}>
+                                {pending[doc.id] ? <><RefreshCw size={11} className="animate-spin" />Writing to chain…</> : "Grant Access"}
+                            </button>
+                        }
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// ═══════════════════ MAIN DASHBOARD ══════════════════════════════════════════
 const PatientDashboard: React.FC = () => {
     const { addToast } = useToast();
     const { theme }    = useTheme();
     const dark         = theme === "dark";
 
-    const [patientWallet, setPatientWallet] = useState("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    const patientWallet = (localStorage.getItem("vault_wallet") || "").toLowerCase();
 
-    useEffect(() => {
-        const loadWallet = async () => {
-            if (window.ethereum) {
-                try {
-                    const accounts: string[] = await window.ethereum.request({ method: "eth_accounts" });
-                    if (accounts.length > 0) setPatientWallet(accounts[0].toLowerCase());
-                } catch {}
-            }
-        };
-        loadWallet();
-        if (window.ethereum) {
-            window.ethereum.on("accountsChanged", (accounts: string[]) => {
-                if (accounts.length > 0) setPatientWallet(accounts[0].toLowerCase());
-            });
-        }
-    }, []);
+    const [tab,    setTab]    = useState<Tab>("OVERVIEW");
+    // @ts-ignore
+    const [records, setRec]   = useState<MedicalRecord[]>(MOCK_RECORDS);
+    const [viewing, setView]  = useState<MedicalRecord | null>(null);
+    // @ts-ignore
+    const [appts,  setAppts]  = useState<Appointment[]>(MOCK_APPOINTMENTS);
+    const [selDoc, setSelDoc] = useState<any>(null);
+    const [uploading, setUpl] = useState(false);
+    const [progress, setProgress] = useState<{ name: string; stage: string; hash?: string; cid?: string } | null>(null);
 
-    const [tab,       setTab]      = useState<Tab>("OVERVIEW");
-    const [records,   setRec]      = useState<MedicalRecord[]>(MOCK_RECORDS);
-    const [viewing,   setView]     = useState<MedicalRecord | null>(null);
-    const [appts,     setAppts]    = useState<Appointment[]>(MOCK_APPOINTMENTS);
-    const [selDoc,    setSelDoc]   = useState<any>(null);
-    const [uploading, setUpl]      = useState(false);
-    const [progress,  setProgress] = useState<{ name: string; stage: string; hash?: string; cid?: string } | null>(null);
-
-    // ── KEY FIX: vitals are ONLY used in OVERVIEW tab.
-    //   Keep them in a separate memoized component so their 1-second state
-    //   updates never re-render the rest of the dashboard. ────────────────────
     const vitals = useLiveVitals();
+    // @ts-ignore
     const unread = (MOCK_HEALTH_ALERTS as any[]).filter(a => !a.read).length;
+
+    // Records live in the backend (Pinata + AES-256-GCM), not in local state —
+    // fetch the real ones on mount instead of leaving MOCK_RECORDS in place.
+    useEffect(() => {
+        if (!patientWallet) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const data = await listMedicalRecords(patientWallet, patientWallet);
+                if (cancelled) return;
+                const formatted: MedicalRecord[] = data.map(rec => ({
+                    id: rec.recordId,
+                    backendRecordId: rec.recordId,
+                    name: rec.original.name,
+                    type: rec.original.mimeType?.startsWith("image/") ? "IMAGE" : "PDF",
+                    date: new Date(rec.createdAt).toISOString().split("T")[0],
+                    hash: rec.ciphertextSha256,
+                    ipfsCid: rec.cid,
+                    notarized: true,
+                    sharedWith: [],
+                    encryptionType: "AES-GCM",
+                    category: "Uploaded",
+                }));
+                setRec(formatted);
+            } catch (err) {
+                // Backend offline or auth failed — leave the demo records in place
+                // so the UI still shows something rather than an empty vault.
+                console.error("[Patient] fetchRecords error:", err);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [patientWallet]);
 
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
         setUpl(true);
-        setProgress({ name: file.name, stage: "Hashing file…" });
+        setProgress({ name: file.name, stage: "Preparing encrypted upload…" });
         try {
-            const hash = await hashFileSHA256(file);
-            setProgress({ name: file.name, stage: "Uploading to IPFS…", hash });
-
-            const result = await uploadFileToIPFS(file, (stage) => {
-                setProgress({ name: file.name, stage, hash });
+            // The server encrypts first, hashes the ciphertext, and only then pins it to IPFS.
+            const result = await uploadEncryptedMedicalFile(file, patientWallet, (stage) => {
+                setProgress({ name: file.name, stage });
             });
 
-            setProgress({ name: file.name, stage: "Writing to blockchain…", hash, cid: result.cid });
+            setProgress({ name: file.name, stage: "Saving encrypted-record metadata…", hash: result.ciphertextSha256, cid: result.cid });
+            await new Promise(r => setTimeout(r, 900));
 
-            let notarized = false;
-            try {
-                if (window.ethereum) {
-                    await switchToAnvil();
-                    const provider = new ethers.BrowserProvider(window.ethereum as any);
-                    const signer   = await provider.getSigner();
-                    const contract = new ethers.Contract(CONTRACT_ADDRESS.trim(), CONTRACT_ABI, signer);
-                    const txResp   = await contract.addRecord(result.cid, file.name);
-                    await txResp.wait();
-                    notarized = true;
-                } else {
-                    addToast("warning", "MetaMask not found — record saved to IPFS only.");
-                }
-            } catch (chainErr: any) {
-                if (chainErr.message?.includes("ENS") || chainErr.message?.includes("UNSUPPORTED_OPERATION")) {
-                    addToast("warning", "Blockchain write failed — make sure MetaMask is on Anvil Local network (Chain ID 31337).");
-                } else {
-                    addToast("warning", `IPFS upload succeeded but blockchain write failed: ${chainErr.message?.slice(0, 100)}`);
-                }
-            }
-
-            try {
-                await fetch("http://localhost:5000/records/save", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        patientWallet: patientWallet.toLowerCase(),
-                        fileName:      file.name,
-                        ipfsCid:       result.cid,
-                        fileHash:      hash,
-                        fileType:      file.type.includes("pdf") ? "PDF" : "IMAGE",
-                        fileSize:      `${(file.size / 1024 / 1024).toFixed(2)} MB`,
-                        category:      "Uploaded",
-                    }),
-                });
-            } catch { console.warn("[Backend] Save failed"); }
-
+            // IMPORTANT: `id` must be the SAME value as the server's real,
+            // Fabric-registered record ID (result.recordId) — never a
+            // client-generated placeholder like `"rec_" + Date.now()`.
+            // A mismatched `id` here is what was causing "Record ... not
+            // found" chaincode errors when granting/revoking document
+            // access: any UI (e.g. ManageAccessPanel) that reads
+            // `record.id` to build its document picker was submitting an
+            // ID that Fabric had never heard of. `backendRecordId` is kept
+            // as an explicit alias for any code that already depends on it,
+            // but the two must never diverge.
             const newRec: MedicalRecord = {
-                id:             "rec_" + Date.now(),
-                name:           file.name,
-                type:           file.type.includes("pdf") ? "PDF" : "IMAGE",
-                date:           new Date().toISOString().split("T")[0],
-                hash,
-                ipfsCid:        result.cid,
-                notarized,
-                sharedWith:     [],
-                fileUrl:        result.url,
-                encryptionType: "ChaCha20-Poly1305",
-                category:       "Uploaded",
-                size:           `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+                id: result.recordId,
+                name: file.name,
+                type: file.type.includes("pdf") ? "PDF" : "IMAGE",
+                date: new Date().toISOString().split("T")[0],
+                hash: result.ciphertextSha256,
+                ipfsCid: result.cid,
+                backendRecordId: result.recordId,
+                notarized: true,
+                sharedWith: [],
+                encryptionType: "AES-GCM",
+                category: "Uploaded",
             };
             setRec(p => [newRec, ...p]);
             setProgress(null);
-
-            if (notarized) {
-                addToast("success", `✓ ${file.name} uploaded to IPFS & stored on Anvil blockchain!`);
-            } else if (result.source !== "mock") {
-                addToast("success", `✓ ${file.name} uploaded to IPFS & saved to backend.`);
-            } else {
-                addToast("warning", `⚠ Add VITE_PINATA_JWT to .env for real IPFS upload.`);
-            }
+            addToast("success", `✓ ${file.name} encrypted with AES-256-GCM and stored on IPFS.`);
         } catch (err: any) {
             setProgress(null);
             addToast("error", `Upload failed: ${err?.message ?? "Unknown error"}`);
@@ -370,7 +419,7 @@ const PatientDashboard: React.FC = () => {
             date: new Date(Date.now() + 86400000 * 3).toLocaleDateString("en-IN"),
             time: "11:00 AM", status: "PENDING", type,
         };
-        await fetch("http://localhost:5000/book-appointment", {
+        await fetch(`${API_BASE_URL}/book-appointment`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(appt),
         }).catch(() => {});
         setAppts(p => [...p, appt]);
@@ -391,32 +440,20 @@ const PatientDashboard: React.FC = () => {
         { label: "Access",        id: "ACCESS"         as Tab, icon: <Shield size={14} /> },
         { label: "Book",          id: "BOOK"           as Tab, icon: <Calendar size={14} /> },
         { label: "Trends",        id: "TRENDS"         as Tab, icon: <TrendingUp size={14} /> },
+        { label: "AI Check",      id: "AI"             as Tab, icon: <Sparkles size={14} /> },
         { label: "Prescriptions", id: "PRESCRIPTIONS"  as Tab, icon: <QrCode size={14} /> },
         { label: "Audit",         id: "AUDIT"          as Tab, icon: <ShieldCheck size={14} /> },
+        { label: "Claims",        id: "CLAIMS"         as Tab, icon: <FileText size={14} /> },
         { label: "Tele",          id: "TELE"           as Tab, icon: <Video size={14} /> },
         { label: "Alerts",        id: "ALERTS"         as Tab, icon: <Bell size={14} /> },
         { label: "Settings",      id: "SETTINGS"       as Tab, icon: <Settings size={14} /> },
     ];
 
-    // ── Generic sub-page wrapper for lazy components ───────────────────────────
-    const Sub = useCallback(({ children }: { children: React.ReactNode }) => (
-        <React.Suspense fallback={
-            <div className={`flex items-center justify-center py-20 text-sm ${t2(dark)}`}>
-                <RefreshCw size={16} className="animate-spin mr-2" /> Loading…
-            </div>
-        }>
-            <div className={`border rounded-xl ${tab === "SETTINGS" ? "overflow-hidden" : "p-6"} ${card(dark)}`}
-                 style={tab === "SETTINGS" ? { minHeight: 600 } : {}}>
-                {children}
-            </div>
-        </React.Suspense>
-    ), [dark, tab]);
-
     return (
         <div className="min-h-screen bg-transparent pt-20 pb-16 px-4 sm:px-6">
             <div className="max-w-7xl mx-auto">
 
-                {/* Header */}
+                {/* ── Header ── */}
                 <div className="flex justify-between items-center mb-8">
                     <div>
                         <h1 className={`text-3xl font-bold tracking-tight ${tx(dark)}`}>Patient Dashboard</h1>
@@ -424,14 +461,17 @@ const PatientDashboard: React.FC = () => {
                             Connected: <span className="font-mono text-sky-500">{patientWallet.slice(0, 10)}…{patientWallet.slice(-4)}</span>
                         </p>
                     </div>
-                    <label className={`flex items-center gap-2 px-5 py-2.5 rounded-xl cursor-pointer text-sm font-semibold transition-all shadow-sm text-white ${uploading ? "bg-sky-400 cursor-not-allowed" : "bg-sky-500 hover:bg-sky-600"}`}>
-                        <Upload className="h-4 w-4" />
-                        <input type="file" className="hidden" onChange={handleUpload} accept=".pdf,.png,.jpg,.jpeg" disabled={uploading} />
-                        {uploading ? "Uploading…" : "Upload Record"}
-                    </label>
+                    <div className="flex items-center gap-3">
+                        <NotificationBell wallet={patientWallet} dark={dark} />
+                        <label className={`flex items-center gap-2 px-5 py-2.5 rounded-xl cursor-pointer text-sm font-semibold transition-all shadow-sm text-white ${uploading ? "bg-sky-400 cursor-not-allowed" : "bg-sky-500 hover:bg-sky-600"}`}>
+                            <Upload className="h-4 w-4" />
+                            <input type="file" className="hidden" onChange={handleUpload} accept=".pdf,.png,.jpg,.jpeg" disabled={uploading} />
+                            {uploading ? "Uploading…" : "Upload Record"}
+                        </label>
+                    </div>
                 </div>
 
-                {/* Upload progress */}
+                {/* ── Upload progress ── */}
                 {progress && (
                     <div className={`mb-6 border rounded-xl p-4 ${card(dark)}`}>
                         <div className="flex items-center gap-3 mb-3">
@@ -453,19 +493,19 @@ const PatientDashboard: React.FC = () => {
                         )}
                         <div className="mt-2 h-1.5 rounded-full bg-gray-100 overflow-hidden">
                             <div className="h-full bg-sky-500 rounded-full transition-all duration-500"
-                                 style={{ width: progress.stage.includes("blockchain") ? "80%" : progress.cid ? "65%" : progress.hash ? "40%" : "15%" }} />
+                                 style={{ width: progress.cid ? "90%" : progress.hash ? "55%" : "20%" }} />
                         </div>
                     </div>
                 )}
 
-                {/* Tab bar */}
+                {/* ── Tab bar ── */}
                 <div className={`flex gap-0.5 border-b mb-8 overflow-x-auto pb-px ${dv(dark)}`}>
                     {TABS.map(t => (
                         <button key={t.id} onClick={() => setTab(t.id)}
                                 className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium whitespace-nowrap border-b-2 transition-all ${
-                                    tab === t.id ? "border-sky-500 text-sky-500"
-                                        : dark ? "border-transparent text-gray-500 hover:text-gray-300"
-                                            : "border-transparent text-gray-400 hover:text-gray-700"
+                                    tab === t.id
+                                        ? "border-sky-500 text-sky-500"
+                                        : dark ? "border-transparent text-gray-500 hover:text-gray-300" : "border-transparent text-gray-400 hover:text-gray-700"
                                 }`}>
                             {t.icon} {t.label}
                             {t.id === "ALERTS" && unread > 0 && (
@@ -518,7 +558,7 @@ const PatientDashboard: React.FC = () => {
                             <div className={`border rounded-xl p-5 ${card(dark)}`}>
                                 <div className="flex items-center justify-between mb-4">
                                     <h3 className={`text-sm font-semibold ${tx(dark)}`}>Upcoming appointments</h3>
-                                    <button onClick={() => setTab("BOOK")} className="text-xs text-sky-500">Book new →</button>
+                                    <button onClick={() => setTab("BOOK")} className="text-xs text-sky-500 hover:text-sky-400">Book new →</button>
                                 </div>
                                 {appts.filter(a => a.status !== "COMPLETED").slice(0, 3).map(a => (
                                     <div key={a.id} className={`flex items-center justify-between py-3 border-b last:border-0 ${dv(dark)}`}>
@@ -543,10 +583,10 @@ const PatientDashboard: React.FC = () => {
                                 <h3 className={`text-sm font-semibold mb-4 ${tx(dark)}`}>Quick actions</h3>
                                 <div className="grid grid-cols-2 gap-3">
                                     {[
-                                        { label: "AI Symptom check", icon: <Sparkles size={15} />, tab: "AI"     as Tab, lc: dark ? "text-violet-400" : "text-violet-600", bc: dark ? "bg-violet-500/10 border-violet-500/20" : "bg-violet-50 border-violet-200" },
-                                        { label: "Book appointment", icon: <Calendar size={15} />,  tab: "BOOK"   as Tab, lc: dark ? "text-sky-400"    : "text-sky-600",    bc: dark ? "bg-sky-500/10 border-sky-500/20"       : "bg-sky-50 border-sky-200" },
-                                        { label: "Medical vault",    icon: <Database size={15} />,  tab: "VAULT"  as Tab, lc: dark ? "text-teal-400"   : "text-teal-600",   bc: dark ? "bg-teal-500/10 border-teal-500/20"     : "bg-teal-50 border-teal-200" },
-                                        { label: "Health trends",    icon: <TrendingUp size={15} />,tab: "TRENDS" as Tab, lc: dark ? "text-amber-400"  : "text-amber-600",  bc: dark ? "bg-amber-500/10 border-amber-500/20"   : "bg-amber-50 border-amber-200" },
+                                        { label: "AI Symptom check", icon: <Sparkles size={15} />, tab: "AI"          as Tab, lc: dark ? "text-violet-400" : "text-violet-600", bc: dark ? "bg-violet-500/10 border-violet-500/20" : "bg-violet-50 border-violet-200" },
+                                        { label: "Book appointment", icon: <Calendar size={15} />,  tab: "BOOK"        as Tab, lc: dark ? "text-sky-400"    : "text-sky-600",    bc: dark ? "bg-sky-500/10 border-sky-500/20"       : "bg-sky-50 border-sky-200" },
+                                        { label: "Medical vault",    icon: <Database size={15} />,  tab: "VAULT"       as Tab, lc: dark ? "text-teal-400"   : "text-teal-600",   bc: dark ? "bg-teal-500/10 border-teal-500/20"     : "bg-teal-50 border-teal-200" },
+                                        { label: "Health trends",    icon: <TrendingUp size={15} />,tab: "TRENDS"      as Tab, lc: dark ? "text-amber-400"  : "text-amber-600",  bc: dark ? "bg-amber-500/10 border-amber-500/20"   : "bg-amber-50 border-amber-200" },
                                     ].map(a => (
                                         <button key={a.label} onClick={() => setTab(a.tab)}
                                                 className={`flex items-center gap-2.5 p-3.5 rounded-xl border text-xs font-semibold transition-all hover:scale-[1.02] active:scale-95 ${a.lc} ${a.bc}`}>
@@ -565,7 +605,7 @@ const PatientDashboard: React.FC = () => {
                         <div className={`px-6 py-4 border-b flex items-center justify-between ${dv(dark)}`}>
                             <div>
                                 <h2 className={`font-bold ${tx(dark)}`}>Medical Vault</h2>
-                                <p className={`text-xs mt-0.5 ${t2(dark)}`}>{records.length} records · ChaCha20-Poly1305 encrypted</p>
+                                <p className={`text-xs mt-0.5 ${t2(dark)}`}>{records.length} records · AES-256-GCM protected uploads</p>
                             </div>
                             <label className="flex items-center gap-1.5 text-xs bg-sky-500 text-white px-3 py-1.5 rounded-lg cursor-pointer hover:bg-sky-600 transition-all font-semibold">
                                 <Plus size={13} />
@@ -574,7 +614,7 @@ const PatientDashboard: React.FC = () => {
                             </label>
                         </div>
                         {records.length === 0
-                            ? <div className={`text-center py-16 ${t2(dark)}`}><Database className="w-12 h-12 mx-auto mb-3 opacity-20" /><p className="text-sm">No records yet.</p></div>
+                            ? <div className={`text-center py-16 ${t2(dark)}`}><Database className="w-12 h-12 mx-auto mb-3 opacity-20" /><p className="text-sm">No records yet. Upload your first document.</p></div>
                             : <div className="overflow-x-auto">
                                 <table className="w-full text-left">
                                     <thead className={dark ? "bg-white/5" : "bg-gray-50"}>
@@ -604,7 +644,7 @@ const PatientDashboard: React.FC = () => {
                                                 <div className="flex items-center gap-1">
                                                     <span className="truncate max-w-[90px]">{rec.hash.slice(0, 14)}…</span>
                                                     <button onClick={() => { navigator.clipboard.writeText(rec.hash); addToast("success", "Hash copied."); }}
-                                                            className="hover:text-sky-500 flex-shrink-0"><Copy size={10} /></button>
+                                                            className="hover:text-sky-500 flex-shrink-0 transition-colors"><Copy size={10} /></button>
                                                 </div>
                                             </td>
                                             <td className={`px-5 py-4 text-[10px] font-mono ${t2(dark)}`}>
@@ -612,14 +652,14 @@ const PatientDashboard: React.FC = () => {
                                                     <span className="truncate max-w-[80px]">{rec.ipfsCid.slice(0, 10)}…</span>
                                                     {rec.fileUrl && (
                                                         <a href={rec.fileUrl} target="_blank" rel="noreferrer"
-                                                           className="hover:text-sky-500 flex-shrink-0"><ExternalLink size={10} /></a>
+                                                           className="hover:text-sky-500 flex-shrink-0 transition-colors"><ExternalLink size={10} /></a>
                                                     )}
                                                 </div>
                                             </td>
                                             <td className="px-5 py-4">
-                                                <span className={`flex items-center gap-1 text-xs font-semibold ${rec.notarized ? "text-green-500" : "text-gray-400"}`}>
-                                                    {rec.notarized ? <><CheckCircle size={11} /> Notarized</> : <><Clock size={11} /> Pending</>}
-                                                </span>
+                                                    <span className={`flex items-center gap-1 text-xs font-semibold ${rec.notarized ? "text-green-500" : "text-gray-400"}`}>
+                                                        {rec.notarized ? <><CheckCircle size={11} /> Notarized</> : <><Clock size={11} /> Pending</>}
+                                                    </span>
                                             </td>
                                             <td className="px-5 py-4">
                                                 <div className="flex items-center gap-2">
@@ -646,8 +686,25 @@ const PatientDashboard: React.FC = () => {
 
                 {/* ════ ACCESS ════ */}
                 {tab === "ACCESS" && (
-                    <div className={`border rounded-xl p-6 ${card(dark)}`}>
-                        <PatientAccessPanel patientWallet={patientWallet} patientName="Rajesh Kumar" dark={dark} />
+                    <div className="space-y-6">
+
+                        {/* Patient ↔ Doctor connection */}
+                        <div className={`border rounded-xl p-6 ${card(dark)}`}>
+                            <PatientAccessPanel
+                                patientWallet={patientWallet}
+                                patientName="Patient"
+                                dark={dark}
+                            />
+                        </div>
+
+                        {/* Document-level access permissions */}
+                        <div className={`border rounded-xl p-6 ${card(dark)}`}>
+                            <ManageAccessPanel
+                                patientWallet={patientWallet}
+                                records={records}
+                            />
+                        </div>
+
                     </div>
                 )}
 
@@ -687,7 +744,7 @@ const PatientDashboard: React.FC = () => {
                                     </div>
                                     <p className={`text-xs mb-1 ${t2(dark)}`}>{doc.hospital}</p>
                                     <div className="flex items-center gap-0.5 mb-4">
-                                        {[1,2,3,4,5].map(s => (
+                                        {[1, 2, 3, 4, 5].map(s => (
                                             <span key={s} className={`text-sm ${s <= Math.round(doc.rating ?? 0) ? "text-amber-400" : dark ? "text-gray-700" : "text-gray-300"}`}>★</span>
                                         ))}
                                         <span className={`text-xs ml-1 ${t2(dark)}`}>{doc.rating}</span>
@@ -711,28 +768,30 @@ const PatientDashboard: React.FC = () => {
                 {/* ════ AUDIT ════ */}
                 {tab === "AUDIT" && (
                     <div className={`border rounded-xl p-6 ${card(dark)}`}>
-                        <AuditTrail dark={dark} />
+                        <FabricAuditPanel patientWallet={patientWallet} records={records} />
+                    </div>
+                )}
+
+                {/* ════ CLAIMS ════ */}
+                {tab === "CLAIMS" && (
+                    <div className={`border rounded-xl p-6 ${card(dark)}`}>
+                        <InsuranceClaimsPanel patientWallet={patientWallet} records={records} />
                     </div>
                 )}
 
                 {/* ════ Lazy sub-pages ════ */}
-                {tab === "TRENDS"  && <Sub><HealthTrends /></Sub>}
-                {tab === "AI"      && <Sub><SymptomChecker records={records} /></Sub>}
-                {tab === "TELE"    && <Sub><Telemedicine role="PATIENT" doctor={selDoc ?? (DOCTORS as any[])[0]} records={records} /></Sub>}
-                {tab === "ALERTS"  && <Sub><RecordExpiry records={records} /></Sub>}
-                {tab === "SETTINGS" && <Sub><SettingsPanel role={UserRole.PATIENT} walletAddress={patientWallet} /></Sub>}
-
-                {/* ════ PRESCRIPTIONS — memoized, completely isolated from vitals ════ */}
-                {tab === "PRESCRIPTIONS" && (
-                    <div className={`border rounded-xl p-6 ${card(dark)}`}>
-                        <PrescriptionsTab patientWallet={patientWallet} />
-                    </div>
-                )}
-
+                {tab === "TRENDS"        && <SubPage dark={dark} tab={tab}><HealthTrends /></SubPage>}
+                {tab === "AI"            && <SubPage dark={dark} tab={tab}><SymptomChecker records={records} /></SubPage>}
+                {tab === "PRESCRIPTIONS" && <SubPage dark={dark} tab={tab}>
+                    <PrescriptionQR role="PATIENT" patientWallet={patientWallet} />
+                </SubPage>}
+                {tab === "TELE"          && <SubPage dark={dark} tab={tab}><Telemedicine role="PATIENT" doctor={selDoc ?? (DOCTORS as any[])[0]} records={records} /></SubPage>}
+                {tab === "ALERTS"        && <SubPage dark={dark} tab={tab}><RecordExpiry records={records} /></SubPage>}
+                {tab === "SETTINGS"      && <SubPage dark={dark} tab={tab}><SettingsPanel role={UserRole.PATIENT} walletAddress={patientWallet} /></SubPage>}
             </div>
 
             <React.Suspense fallback={null}>
-                <DocumentViewerModal isOpen={!!viewing} onClose={() => setView(null)} record={viewing} allowDownload />
+                <DocumentViewerModal isOpen={!!viewing} onClose={() => setView(null)} record={viewing} requesterWallet={patientWallet} allowDownload />
             </React.Suspense>
         </div>
     );

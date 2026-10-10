@@ -3,6 +3,12 @@ node_modules/
 
 # Environment
 .env
+backend/.env
+backend/.env.*
+backend/connections.json
+backend/.foundry/
+backend/foundry-out/
+backend/foundry-cache/
 *.local
 
 # Build
@@ -34,3 +40,9 @@ lerna-debug.log*
 foundry/
 cache/
 out/
+
+# Hyperledger Fabric generated artifacts
+fabric-network/organizations/
+fabric-network/channel-artifacts/
+fabric-network/chaincode/node_modules/
+fabric-network/-e

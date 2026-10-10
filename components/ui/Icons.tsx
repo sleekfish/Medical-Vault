@@ -96,6 +96,3 @@ export const Wallet        = safe('Wallet');
 export const X             = safe('X');
 export const XCircle       = safe('XCircle');
 export const Zap           = safe('Zap');
-
-export class Image {
-}

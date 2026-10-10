@@ -1,21 +1,20 @@
 import React from 'react';
-import { Sun, Moon } from './ui/Icons';
 import { useTheme } from '../context/ThemeContext';
+import { Sun, Moon } from './ui/Icons';
 
 const ThemeToggle: React.FC = () => {
     const { theme, toggleTheme } = useTheme();
-
     return (
         <button
             onClick={toggleTheme}
-            className="p-2.5 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-900 dark:text-white transition-all shadow-sm"
-            aria-label="Toggle Theme"
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            className={`p-2 rounded-lg transition-all ${
+                theme === 'dark'
+                    ? 'text-gray-400 hover:text-white hover:bg-white/5'
+                    : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+            }`}
         >
-            {theme === 'dark' ? (
-                <Sun className="h-5 w-5" />
-            ) : (
-                <Moon className="h-5 w-5" />
-            )}
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
         </button>
     );
 };

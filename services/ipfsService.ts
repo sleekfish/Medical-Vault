@@ -1,149 +1,484 @@
-/**
- * ipfsService.ts
- * Supports BOTH Pinata API Key/Secret AND JWT authentication
- * Place in: services/ipfsService.ts
- */
+import {
+    clearWalletAccessToken,
+    getWalletAccessToken,
+} from "./walletAuthService";
 
-const PINATA_JWT     = (import.meta.env.VITE_PINATA_JWT     || "") as string;
-const PINATA_API_KEY = (import.meta.env.VITE_PINATA_API_KEY || "") as string;
-const PINATA_SECRET  = (import.meta.env.VITE_PINATA_SECRET  || "") as string;
-const GATEWAY_URL    = (import.meta.env.VITE_GATEWAY_URL    || "") as string;
+const BACKEND_URL =
+    (import.meta.env.VITE_BACKEND_URL ||
+        "http://localhost:5000") as string;
 
-// Debug on load
-console.log("[IPFS] JWT present:", !!PINATA_JWT);
-console.log("[IPFS] API Key present:", !!PINATA_API_KEY);
-console.log("[IPFS] Secret present:", !!PINATA_SECRET);
-console.log("[IPFS] Gateway:", GATEWAY_URL || "using public gateways");
-
-// Build auth headers — prefer JWT, fall back to API Key + Secret
-function getAuthHeaders(): Record<string, string> {
-    if (PINATA_JWT) {
-        return { Authorization: `Bearer ${PINATA_JWT}` };
-    }
-    if (PINATA_API_KEY && PINATA_SECRET) {
-        return {
-            pinata_api_key:        PINATA_API_KEY,
-            pinata_secret_api_key: PINATA_SECRET,
-        };
-    }
-    return {};
-}
+const GATEWAY_URL =
+    (import.meta.env.VITE_GATEWAY_URL || "") as string;
 
 export const IPFS_GATEWAYS: string[] = [
-    ...(GATEWAY_URL ? [`https://${GATEWAY_URL}/ipfs/`] : []),
+    ...(GATEWAY_URL
+        ? [`https://${GATEWAY_URL}/ipfs/`]
+        : []),
     "https://ipfs.io/ipfs/",
     "https://cloudflare-ipfs.com/ipfs/",
     "https://dweb.link/ipfs/",
-    "https://w3s.link/ipfs/",
 ];
 
-export function getPublicIpfsUrl(cid: string): string {
-    return `${IPFS_GATEWAYS[0]}${cid}`;
-}
-
 export function isRealCid(cid: string): boolean {
-    return !/^Qm[0-9a-f]+$/.test(cid);
+    return !/^Qm[0-9a-f]+$/i.test(cid);
 }
 
-export interface UploadResult {
-    cid:    string;
-    url:    string;
-    source: "pinata" | "backend" | "mock";
+export interface EncryptedUploadResult {
+    recordId: string;
+    cid: string;
+    ciphertextSha256: string;
+
+    encryption: {
+        algorithm: "AES-256-GCM";
+        iv: string;
+        authTag: string;
+        aad: string;
+    };
+
+    original: {
+        name: string;
+        mimeType: string;
+        size: number;
+    };
+
+    createdAt: string;
 }
 
-export async function uploadFileToIPFS(
+/**
+ * Upload a medical file.
+ *
+ * The browser sends the original file to the backend.
+ * The backend encrypts it before storing it on Pinata/IPFS.
+ */
+export async function uploadEncryptedMedicalFile(
     file: File,
-    onProgress?: (stage: string) => void
-): Promise<UploadResult> {
+    patientWallet: string,
+    onProgress?: (stage: string) => void,
+): Promise<EncryptedUploadResult> {
 
-    const authHeaders = getAuthHeaders();
-    const hasAuth = Object.keys(authHeaders).length > 0;
+    onProgress?.("Encrypting medical record…");
 
-    // ── 1. Pinata ─────────────────────────────────────────────────────────────
-    if (hasAuth) {
-        try {
-            onProgress?.("Uploading to Pinata IPFS…");
-            console.log("[IPFS] Uploading:", file.name, `(${(file.size / 1024).toFixed(1)} KB)`);
+    const data = new FormData();
 
-            const fd = new FormData();
-            fd.append("file", file);
-            fd.append("pinataMetadata", JSON.stringify({ name: file.name }));
-            fd.append("pinataOptions",  JSON.stringify({ cidVersion: 1 }));
+    data.append("file", file);
+    data.append("patientWallet", patientWallet);
 
-            const res = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
-                method:  "POST",
-                headers: authHeaders,
-                body:    fd,
-            });
+    const sendUpload = async (accessToken: string) => {
+        return fetch(
+            `${BACKEND_URL}/api/medical-records`,
+            {
+                method: "POST",
 
-            if (res.ok) {
-                const data = await res.json();
-                const cid  = data.IpfsHash as string;
-                console.log("[IPFS] ✓ Pinata upload success — CID:", cid);
-                return { cid, url: getPublicIpfsUrl(cid), source: "pinata" };
-            }
+                headers: {
+                    Authorization:
+                        `Bearer ${accessToken}`,
+                },
 
-            const errText = await res.text();
-            console.error("[IPFS] Pinata error:", res.status, errText);
-        } catch (e) {
-            console.error("[IPFS] Pinata exception:", e);
-        }
-    } else {
-        console.warn("[IPFS] No Pinata credentials found in .env");
+                body: data,
+            },
+        );
+    };
+
+    onProgress?.("Authenticating wallet…");
+
+    let response = await sendUpload(
+        await getWalletAccessToken(patientWallet),
+    );
+
+    /*
+     * Backend sessions are stored in memory.
+     * If the server restarted, renew the wallet session.
+     */
+    if (response.status === 401) {
+
+        clearWalletAccessToken(patientWallet);
+
+        onProgress?.(
+            "Confirm the MetaMask signature to renew access…",
+        );
+
+        response = await sendUpload(
+            await getWalletAccessToken(
+                patientWallet,
+                true,
+            ),
+        );
     }
 
-    // ── 2. Local backend ──────────────────────────────────────────────────────
-    try {
-        onProgress?.("Trying local backend…");
-        const fd = new FormData();
-        fd.append("file", file);
-        const res = await fetch("http://localhost:5000/upload", { method: "POST", body: fd });
-        if (res.ok) {
-            const data = await res.json();
-            const cid  = data.cid as string;
-            console.log("[IPFS] ✓ Backend upload success — CID:", cid);
-            return { cid, url: getPublicIpfsUrl(cid), source: "backend" };
-        }
-        console.warn("[IPFS] Backend error:", res.status);
-    } catch (e) {
-        console.warn("[IPFS] Backend unavailable:", e);
+    const body =
+        await response
+            .json()
+            .catch(() => ({}));
+
+    if (!response.ok) {
+
+        throw new Error(
+            body.error ||
+            "Encrypted upload failed.",
+        );
     }
 
-    // ── 3. Mock fallback ──────────────────────────────────────────────────────
-    console.warn("[IPFS] All upload methods failed");
-    onProgress?.("Upload failed — file hashed locally only");
-    const bytes = crypto.getRandomValues(new Uint8Array(22));
-    const hex   = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
-    return { cid: "Qm" + hex.slice(0, 44), url: "", source: "mock" };
+    return body as EncryptedUploadResult;
 }
 
-export async function hashFileSHA256(file: File): Promise<string> {
-    const buf     = await file.arrayBuffer();
-    const hashBuf = await crypto.subtle.digest("SHA-256", buf);
-    return Array.from(new Uint8Array(hashBuf))
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
+
+/**
+ * List medical records.
+ *
+ * IMPORTANT:
+ * The backend returns:
+ *
+ * {
+ *     recordId: "rec_...",
+ *     cid: "...",
+ *     ...
+ * }
+ *
+ * recordId is the SAME ID used as the Fabric
+ * documentId.
+ */
+export async function listMedicalRecords(
+    patientWallet: string,
+    requesterWallet: string,
+): Promise<EncryptedUploadResult[]> {
+
+    const url =
+        `${BACKEND_URL}/api/medical-records` +
+        `?patientWallet=${encodeURIComponent(
+            patientWallet,
+        )}`;
+
+    const requestList =
+        async (accessToken: string) => {
+
+            return fetch(
+                url,
+                {
+                    method: "GET",
+
+                    headers: {
+                        Authorization:
+                            `Bearer ${accessToken}`,
+                    },
+                },
+            );
+        };
+
+    let response = await requestList(
+        await getWalletAccessToken(
+            requesterWallet,
+        ),
+    );
+
+    /*
+     * Renew wallet session if necessary.
+     */
+    if (response.status === 401) {
+
+        clearWalletAccessToken(
+            requesterWallet,
+        );
+
+        response = await requestList(
+            await getWalletAccessToken(
+                requesterWallet,
+                true,
+            ),
+        );
+    }
+
+    const body =
+        await response
+            .json()
+            .catch(() => ({}));
+
+    if (!response.ok) {
+
+        throw new Error(
+            body.error ||
+            "Could not fetch records.",
+        );
+    }
+
+    /*
+     * Normalize the response.
+     *
+     * This is important because the frontend must use
+     * recordId, NOT id, backendRecordId, or a newly
+     * generated record ID.
+     */
+    const records =
+        Array.isArray(body)
+            ? body as EncryptedUploadResult[]
+            : [];
+
+    console.log(
+        "[IPFS] Records received from backend:",
+        records.map((record) => ({
+            recordId: record.recordId,
+            cid: record.cid,
+            fileName:
+            record.original?.name,
+        })),
+    );
+
+    return records;
 }
 
-export async function fetchFromIPFS(cid: string): Promise<Blob | null> {
-    for (const gw of IPFS_GATEWAYS) {
-        try {
-            const isDedicated = GATEWAY_URL && gw.includes(GATEWAY_URL);
-            const url = isDedicated && (PINATA_JWT || PINATA_API_KEY)
-                ? `${gw}${cid}?pinataGatewayToken=${PINATA_JWT || PINATA_API_KEY}`
-                : `${gw}${cid}`;
 
-            console.log("[IPFS] Fetching:", url.slice(0, 70));
-            const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
-            if (res.ok) {
-                console.log("[IPFS] ✓ Blob from:", gw);
-                return res.blob();
+/**
+ * Download and decrypt a medical record.
+ *
+ * IMPORTANT:
+ *
+ * recordId MUST be the actual Fabric documentId.
+ *
+ * Example:
+ *
+ * rec_1786637549368_ce122e66
+ *
+ * The request goes through the backend.
+ *
+ * DO NOT fetch the IPFS CID directly here.
+ *
+ * The backend performs:
+ *
+ * 1. Wallet authentication
+ * 2. Fabric access authorization
+ * 3. Record lookup
+ * 4. IPFS retrieval
+ * 5. SHA-256 verification
+ * 6. AES-256-GCM decryption
+ *
+ * This prevents a doctor from bypassing the
+ * Fabric authorization layer.
+ */
+export async function fetchDecryptedMedicalFile(
+    recordId: string,
+    requesterWallet: string,
+): Promise<Blob> {
+
+    /*
+     * Validate the ID before making the request.
+     */
+    if (
+        typeof recordId !== "string" ||
+        recordId.trim().length === 0
+    ) {
+        throw new Error(
+            "Medical record ID is missing.",
+        );
+    }
+
+    /*
+     * Validate wallet before making the request.
+     */
+    if (
+        typeof requesterWallet !== "string" ||
+        !/^0x[a-fA-F0-9]{40}$/.test(
+            requesterWallet,
+        )
+    ) {
+        throw new Error(
+            "A valid requester wallet is required.",
+        );
+    }
+
+    const cleanRecordId =
+        recordId.trim();
+
+    /*
+     * IMPORTANT:
+     *
+     * Backend route:
+     *
+     * GET /api/medical-records/:recordId/download
+     *
+     * Therefore the Fabric document ID must
+     * be placed in the URL.
+     */
+    const downloadUrl =
+        `${BACKEND_URL}/api/medical-records/` +
+        `${encodeURIComponent(
+            cleanRecordId,
+        )}/download`;
+
+    console.log(
+        "[IPFS] Requesting protected medical file:",
+        {
+            recordId: cleanRecordId,
+            requesterWallet,
+            url: downloadUrl,
+        },
+    );
+
+    const requestDownload =
+        async (accessToken: string) => {
+
+            return fetch(
+                downloadUrl,
+                {
+                    method: "GET",
+
+                    headers: {
+                        Authorization:
+                            `Bearer ${accessToken}`,
+                    },
+
+                    /*
+                     * Prevent browser caching of
+                     * decrypted medical documents.
+                     */
+                    cache: "no-store",
+                },
+            );
+        };
+
+    /*
+     * First attempt using the existing wallet session.
+     */
+    let response =
+        await requestDownload(
+            await getWalletAccessToken(
+                requesterWallet,
+            ),
+        );
+
+    /*
+     * Session expired → renew MetaMask
+     * authentication and retry once.
+     */
+    if (response.status === 401) {
+
+        console.log(
+            "[IPFS] Wallet session expired. Renewing...",
+        );
+
+        clearWalletAccessToken(
+            requesterWallet,
+        );
+
+        const newAccessToken =
+            await getWalletAccessToken(
+                requesterWallet,
+                true,
+            );
+
+        response =
+            await requestDownload(
+                newAccessToken,
+            );
+    }
+
+    /*
+     * Handle authorization/download errors.
+     */
+    if (!response.ok) {
+
+        const body =
+            await response
+                .json()
+                .catch(() => ({}));
+
+        console.error(
+            "[IPFS] Protected file request failed:",
+            {
+                status: response.status,
+                recordId: cleanRecordId,
+                error: body.error,
+            },
+        );
+
+        throw new Error(
+            body.error ||
+            "Unable to decrypt this record.",
+        );
+    }
+
+    /*
+     * Backend returns the decrypted file as a Blob.
+     */
+    const blob =
+        await response.blob();
+
+    if (blob.size === 0) {
+
+        throw new Error(
+            "The decrypted medical record is empty.",
+        );
+    }
+
+    console.log(
+        "[IPFS] Protected medical file received:",
+        {
+            recordId: cleanRecordId,
+            size: blob.size,
+            type: blob.type,
+        },
+    );
+
+    return blob;
+}
+
+
+/**
+ * Legacy/mock IPFS retrieval.
+ *
+ * IMPORTANT:
+ * Do not use this for authorized doctor records.
+ *
+ * It is retained only for old/mock records that
+ * existed before encrypted backend downloads.
+ */
+export async function fetchFromIPFS(
+    cid: string,
+): Promise<Blob | null> {
+
+    if (
+        typeof cid !== "string" ||
+        cid.trim().length === 0
+    ) {
+        return null;
+    }
+
+    for (
+        const gateway of IPFS_GATEWAYS
+        ) {
+
+        try {
+
+            const response =
+                await fetch(
+                    `${gateway}${encodeURIComponent(
+                        cid,
+                    )}`,
+                    {
+                        method: "GET",
+
+                        /*
+                         * Don't cache legacy
+                         * IPFS responses.
+                         */
+                        cache: "no-store",
+
+                        signal:
+                            AbortSignal.timeout(
+                                12_000,
+                            ),
+                    },
+                );
+
+            if (response.ok) {
+
+                return response.blob();
             }
-            console.warn("[IPFS]", res.status, "from", gw);
-        } catch (e) {
-            console.warn("[IPFS] Failed:", gw, e);
+
+        } catch {
+            /*
+             * Try the next gateway.
+             */
         }
     }
-    console.error("[IPFS] All gateways failed for CID:", cid);
+
     return null;
 }

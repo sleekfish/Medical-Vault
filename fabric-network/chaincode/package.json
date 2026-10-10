@@ -1,0 +1,17 @@
+{
+  "name": "medivault-chaincode",
+  "version": "1.0.0",
+  "description": "MediVault Hyperledger Fabric chaincode for healthcare record management",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "fabric-chaincode-node start",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "fabric-contract-api": "^2.5.0",
+    "fabric-shim": "^2.5.0"
+  }
+}

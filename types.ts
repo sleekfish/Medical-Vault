@@ -1,88 +1,113 @@
 export enum UserRole {
-  PATIENT = 'PATIENT',
-  DOCTOR = 'DOCTOR',
-  ADMIN = 'ADMIN'
+    PATIENT = 'PATIENT',
+    DOCTOR  = 'DOCTOR',
 }
 
 export interface User {
-  id: string;
-  email: string;
-  role: UserRole;
-  name: string;
-  isVerified?: boolean; // For doctors
-  abdmId?: string; // India specific health ID
+    id:         string;
+    email:      string;
+    name:       string;
+    role:       UserRole;
+    isVerified: boolean;
 }
 
 export interface MedicalRecord {
-  id: string;
-  name: string;
-  type: 'PDF' | 'IMAGE' | 'LAB_REPORT' | 'PRESCRIPTION';
-  date: string;
-  size: string;
-  hash: string; // Keccak-256
-  encryptionType: 'ChaCha20-Poly1305';
-  ipfsCid: string; // Arweave/IPFS reference
-  notarized: boolean; // Polygon status
-  sharedWith: string[]; // Doctor IDs
-  fileUrl?: string; // Local blob URL for previewing uploaded files
-    category: string;
+    id:              string;
+    name:            string;
+    type:            string;
+    date:            string;
+    size?:           string;
+    hash:            string;
+    encryptionType?: 'ChaCha20-Poly1305' | 'AES-GCM';   // ← fixed: was string literal union in mockData
+    ipfsCid:         string;
+    backendRecordId?: string;
+    notarized:       boolean;
+    sharedWith:      string[];
+    fileUrl?:        string;
+    expiryDate?:     string;      // ← was missing
+    category?:       string;      // ← was missing
 }
 
-export interface VitalStats {
-  heartRate: number;
-  bloodPressure: string;
-  spO2: number;
-  temperature: number;
-  lastUpdated: string;
+export interface Doctor {
+    id:              string;
+    name:            string;
+    specialization:  string;
+    hospital?:       string;      // ← was missing
+    rating?:         number;      // ← was missing
+    available?:      boolean;     // ← was missing
+    walletAddress?:  string;      // ← was missing
+    licenseNo?:      string;      // ← was missing
 }
 
-export interface DoctorProfile {
-  id: string;
-  name: string;
-  specialty: string;
-  licenseNumber: string; // Medical Council License
-  hospitalAffiliation: string;
-  verified: boolean;
-  rating: number;
+export interface AccessLog {
+    doctorId:          string;
+    doctorName:        string;
+    action:            'GRANTED' | 'REVOKED' | 'ACCESSED';
+    timestamp:         string;
+    txHash?:           string;
+    recordsAccessed?:  string[];
 }
 
-export class BreakGlassRequest {
+export interface Appointment {
+    id:             string;
+    patientWallet:  string;
+    doctorId:       string;
+    doctorName:     string;
+    specialization: string;
+    date:           string;
+    time?:          string;
+    status:         'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'CANCELLED';
+    type:           'IN_PERSON' | 'TELEMEDICINE';
+    notes?:         string;
 }
 
-export class VitalsReading {
-    timestamp:any ;
+export interface VitalsReading {
+    timestamp:  string;
+    heartRate:  number;
+    spo2:       number;
+    systolic:   number;
+    diastolic:  number;
+    weight?:    number;
+    glucose?:   number;
 }
 
-export class HealthAlert {
-    read: unknown;
-    id: React.Key;
-    type: string;
-    timestamp: any;
-    message: any;
+export interface HealthAlert {
+    id:        string;
+    type:      'WARNING' | 'INFO' | 'CRITICAL';
+    message:   string;
+    timestamp: string;
+    read:      boolean;
 }
 
-export class AccessLog {
-    action: "GRANTED" | "REVOKED" | "ACCESSED";
-    doctorName: any;
-    timestamp: any;
-    recordsAccessed: any;
-    txHash: any;
+export interface SymptomCheckResult {
+    triageSeverity:     'LOW' | 'MEDIUM' | 'HIGH' | 'EMERGENCY';
+    possibleConditions: string[];
+    recommendation:     string;
+    relatedRecords:     string[];
+    disclaimer:         string;
 }
 
-export class Appointment {
+export interface PrescriptionQR {
+    id:            string;
+    patientWallet: string;
+    doctorId:      string;
+    doctorName:    string;
+    medication:    string;
+    dosage:        string;
+    duration:      string;
+    issuedDate:    string;
+    expiryDate:    string;
+    txHash:        string;
+    verified:      boolean;
 }
 
-export class Doctor {
-    name: any;
-    specialization: any;
-    available: any;
-    hospital: any;
-    rating: number;
-    id: string;
-}
-
-export class PrescriptionQR {
-}
-
-export class SymptomCheckResult {
+export interface BreakGlassRequest {
+    id:            string;
+    doctorId:      string;
+    doctorName:    string;
+    reason:        string;
+    requestedAt:   string;
+    expiresAt:     string;
+    approved:      boolean;
+    patientWallet: string;
 }

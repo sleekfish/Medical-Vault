@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: medivault-demo-api
+    runtime: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_ORIGIN
+        fromService:
+          name: medivault-demo
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: PINATA_JWT
+        sync: false
+      - key: PINATA_GATEWAY_URL
+        sync: false
+      - key: PINATA_GATEWAY_TOKEN
+        sync: false
+      - key: ENCRYPTION_KEY_BASE64
+        sync: false
+  - type: web
+    name: medivault-demo
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_BACKEND_URL
+        fromService:
+          name: medivault-demo-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL

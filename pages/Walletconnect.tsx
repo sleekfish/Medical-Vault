@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useToast } from "../context/ToastContext";
+import { API_BASE_URL } from "../services/apiConfig";
 
-const API = "http://localhost:5000";
+const API = API_BASE_URL;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface Connection {
@@ -88,6 +89,7 @@ export const PatientAccessPanel: React.FC<{
                     }
                 } catch {}
             }
+            // Fallback to localStorage or prop
             const stored = localStorage.getItem("vault_wallet") || propWallet;
             setLiveWallet(stored.toLowerCase());
         };
@@ -96,6 +98,7 @@ export const PatientAccessPanel: React.FC<{
 
     const myWallet = liveWallet || propWallet.toLowerCase();
 
+    // Poll connections from backend every 3s
     const fetchConnections = useCallback(async () => {
         if (!myWallet) return;
         try {
@@ -145,23 +148,16 @@ export const PatientAccessPanel: React.FC<{
         setLoading(false);
     };
 
-    // Revoke uses ID first, falls back to wallet pair
     const revoke = async (id: string, name: string, doctorW: string) => {
         try {
-            await apiRequest(`${API}/connection/revoke/${id}`);
+            await apiRequest(`${API}/connection/revoke`, {
+                patientWallet: myWallet,
+                doctorWallet:  doctorW.toLowerCase(),
+            });
             addToast("info", `Access revoked for ${name}.`);
             fetchConnections();
         } catch {
-            try {
-                await apiRequest(`${API}/connection/revoke`, {
-                    patientWallet: myWallet,
-                    doctorWallet:  doctorW.toLowerCase(),
-                });
-                addToast("info", `Access revoked for ${name}.`);
-                fetchConnections();
-            } catch {
-                addToast("error", "Could not revoke — backend unavailable.");
-            }
+            addToast("error", "Could not revoke — backend unavailable.");
         }
     };
 
@@ -180,6 +176,7 @@ export const PatientAccessPanel: React.FC<{
                 </div>
             </div>
 
+            {/* Backend status */}
             {backendDown && (
                 <div className="mb-4 flex items-center gap-2 p-3 rounded-xl bg-red-50 border border-red-200 text-red-600 text-xs">
                     <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />
@@ -187,6 +184,7 @@ export const PatientAccessPanel: React.FC<{
                 </div>
             )}
 
+            {/* Your wallet card */}
             <div className={`flex items-center gap-3 p-3 rounded-xl border mb-6 ${dark ? "bg-sky-500/5 border-sky-500/20" : "bg-sky-50 border-sky-200"}`}>
                 <div className="w-8 h-8 rounded-lg bg-sky-500/10 flex items-center justify-center flex-shrink-0">
                     <span className="text-sky-500 text-xs font-bold">YOU</span>
@@ -201,6 +199,7 @@ export const PatientAccessPanel: React.FC<{
                 >Copy</button>
             </div>
 
+            {/* Sub-tabs */}
             <div className={`flex border-b mb-5 ${S.dv(dark)}`}>
                 {(["REQUEST", "MANAGE"] as const).map(t => (
                     <button key={t} onClick={() => setTab(t)}
@@ -213,6 +212,7 @@ export const PatientAccessPanel: React.FC<{
                 ))}
             </div>
 
+            {/* REQUEST TAB */}
             {tab === "REQUEST" && (
                 <div className={`border rounded-2xl p-6 ${S.card(dark)}`}>
                     <h3 className={`text-sm font-bold mb-1 ${S.tx(dark)}`}>Connect a doctor by wallet address</h3>
@@ -248,7 +248,7 @@ export const PatientAccessPanel: React.FC<{
                         <p className={`text-xs font-semibold mb-3 uppercase tracking-wider ${S.t2(dark)}`}>How it works</p>
                         {[
                             ["1", "Enter your doctor's wallet address and send a request"],
-                            ["2", "Doctor sees the request on their dashboard (Pending Requests tab)"],
+                            ["2", "Doctor sees the request on their dashboard (Patients → + Requests)"],
                             ["3", "Doctor clicks Accept — you're now connected"],
                             ["4", "Doctor can view your medical records. You can revoke anytime."],
                         ].map(([n, s]) => (
@@ -261,6 +261,7 @@ export const PatientAccessPanel: React.FC<{
                 </div>
             )}
 
+            {/* MANAGE TAB */}
             {tab === "MANAGE" && (
                 <div className="space-y-5">
                     {connected.length > 0 && (
@@ -370,21 +371,16 @@ export const DoctorAccessPanel: React.FC<{
     doctorName:    string;
     dark:          boolean;
     onViewPatient?: (wallet: string, name: string) => void;
-}> = ({ doctorWallet: rawDoctorWallet, doctorName, dark, onViewPatient }) => {
-    const { addToast } = useToast();
-
-    // Always normalize to lowercase — this was the silent root cause
-    const doctorWallet = rawDoctorWallet.toLowerCase().trim();
-
-    const [connections,   setConnections]   = useState<Connection[]>([]);
-    const [tab,           setTab]           = useState<"REQUESTS" | "PATIENTS">("REQUESTS");
-    const [backendDown,   setBackendDown]   = useState(false);
-    const [actionLoading, setActionLoading] = useState<string | null>(null);
+}> = ({ doctorWallet, doctorName, dark, onViewPatient }) => {
+    const { addToast }  = useToast();
+    const [connections, setConnections] = useState<Connection[]>([]);
+    const [tab,         setTab]         = useState<"REQUESTS" | "PATIENTS">("REQUESTS");
+    const [backendDown, setBackendDown] = useState(false);
 
     const fetchConnections = useCallback(async () => {
         if (!doctorWallet) return;
         try {
-            const data = await apiRequest(`${API}/connection/doctor/${doctorWallet}`);
+            const data = await apiRequest(`${API}/connection/doctor/${doctorWallet.toLowerCase()}`);
             setConnections(Array.isArray(data) ? data : []);
             setBackendDown(false);
         } catch {
@@ -401,70 +397,44 @@ export const DoctorAccessPanel: React.FC<{
     const pending   = connections.filter(c => c.status === "PENDING");
     const connected = connections.filter(c => c.status === "CONNECTED");
 
-    // Accept: try by ID first, fall back to wallet pair automatically
     const accept = async (c: Connection) => {
-        setActionLoading(c.id + "-accept");
-        console.log("[Accept] id:", c.id, " patient:", c.patientWallet, " doctor:", doctorWallet);
+        console.log("[Accept] Sending:", { patientWallet: c.patientWallet, doctorWallet: c.doctorWallet });
         try {
-            await apiRequest(`${API}/connection/accept/${c.id}`);
+            await apiRequest(`${API}/connection/accept`, {
+                patientWallet: c.patientWallet,
+                doctorWallet:  doctorWallet.toLowerCase(),
+            });
             addToast("success", `✓ Connected with ${c.patientName}! You can now view their records.`);
             fetchConnections();
         } catch (err: any) {
-            console.warn("[Accept] ID lookup failed, trying wallet fallback:", err.message);
-            try {
-                await apiRequest(`${API}/connection/accept`, {
-                    patientWallet: c.patientWallet,
-                    doctorWallet:  doctorWallet,
-                });
-                addToast("success", `✓ Connected with ${c.patientName}!`);
-                fetchConnections();
-            } catch (fallbackErr: any) {
-                console.error("[Accept] Both methods failed:", fallbackErr.message);
-                addToast("error", `Accept failed: ${fallbackErr.message}`);
-            }
+            console.error("[Accept] Error:", err.message);
+            addToast("error", `Accept failed: ${err.message}`);
         }
-        setActionLoading(null);
     };
 
-    // Reject: try by ID first, fall back to wallet pair automatically
     const reject = async (c: Connection) => {
-        setActionLoading(c.id + "-reject");
         try {
-            await apiRequest(`${API}/connection/reject/${c.id}`);
+            await apiRequest(`${API}/connection/reject`, {
+                patientWallet: c.patientWallet,
+                doctorWallet:  doctorWallet.toLowerCase(),
+            });
             addToast("info", `Request from ${c.patientName} rejected.`);
             fetchConnections();
         } catch {
-            try {
-                await apiRequest(`${API}/connection/reject`, {
-                    patientWallet: c.patientWallet,
-                    doctorWallet:  doctorWallet,
-                });
-                addToast("info", `Request from ${c.patientName} rejected.`);
-                fetchConnections();
-            } catch (fallbackErr: any) {
-                addToast("error", `Reject failed: ${fallbackErr.message}`);
-            }
+            addToast("error", "Could not reject — backend unavailable.");
         }
-        setActionLoading(null);
     };
 
-    // Revoke: try by ID first, fall back to wallet pair automatically
     const revoke = async (c: Connection) => {
         try {
-            await apiRequest(`${API}/connection/revoke/${c.id}`);
+            await apiRequest(`${API}/connection/revoke`, {
+                patientWallet: c.patientWallet,
+                doctorWallet:  doctorWallet.toLowerCase(),
+            });
             addToast("info", `Access for ${c.patientName} revoked.`);
             fetchConnections();
         } catch {
-            try {
-                await apiRequest(`${API}/connection/revoke`, {
-                    patientWallet: c.patientWallet,
-                    doctorWallet:  doctorWallet,
-                });
-                addToast("info", `Access for ${c.patientName} revoked.`);
-                fetchConnections();
-            } catch {
-                addToast("error", "Could not revoke — backend unavailable.");
-            }
+            addToast("error", "Could not revoke — backend unavailable.");
         }
     };
 
@@ -481,6 +451,7 @@ export const DoctorAccessPanel: React.FC<{
                 </div>
             )}
 
+            {/* Doctor wallet — share with patients */}
             <div className={`flex items-center gap-3 p-4 rounded-2xl border mb-5 ${dark ? "bg-green-500/5 border-green-500/20" : "bg-green-50 border-green-200"}`}>
                 <div className="w-10 h-10 rounded-xl bg-green-500/10 flex items-center justify-center flex-shrink-0">
                     <span className="text-green-500 text-xs font-bold">DR</span>
@@ -495,6 +466,7 @@ export const DoctorAccessPanel: React.FC<{
                 >Copy</button>
             </div>
 
+            {/* Sub-tabs */}
             <div className={`flex border-b mb-5 ${S.dv(dark)}`}>
                 <button onClick={() => setTab("REQUESTS")}
                         className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-all flex items-center gap-1.5 ${tab === "REQUESTS" ? "border-green-500 text-green-500" : `border-transparent ${S.t2(dark)}`}`}>
@@ -511,6 +483,7 @@ export const DoctorAccessPanel: React.FC<{
                         className={`ml-auto mb-1 px-3 text-xs ${S.t2(dark)} hover:text-green-500`}>↻ Refresh</button>
             </div>
 
+            {/* PENDING REQUESTS */}
             {tab === "REQUESTS" && (
                 pending.length === 0 ? (
                     <div className={`text-center py-12 border rounded-2xl ${S.card(dark)}`}>
@@ -538,25 +511,13 @@ export const DoctorAccessPanel: React.FC<{
                                     <StatusBadge status="PENDING" />
                                 </div>
                                 <div className="flex gap-2">
-                                    <button
-                                        onClick={() => accept(c)}
-                                        disabled={actionLoading !== null}
-                                        className="flex-1 py-2 rounded-xl text-sm font-bold bg-green-500 hover:bg-green-600 text-white transition-all disabled:opacity-60 flex items-center justify-center gap-2"
-                                    >
-                                        {actionLoading === c.id + "-accept"
-                                            ? <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Accepting…</>
-                                            : "✓ Accept"
-                                        }
+                                    <button onClick={() => accept(c)}
+                                            className="flex-1 py-2 rounded-xl text-sm font-bold bg-green-500 hover:bg-green-600 text-white transition-all">
+                                        ✓ Accept
                                     </button>
-                                    <button
-                                        onClick={() => reject(c)}
-                                        disabled={actionLoading !== null}
-                                        className={`flex-1 py-2 rounded-xl text-sm font-bold border transition-all disabled:opacity-60 flex items-center justify-center gap-2 ${dark ? "border-white/10 text-gray-400 hover:text-red-400" : "border-gray-200 text-gray-500 hover:text-red-500 hover:border-red-200"}`}
-                                    >
-                                        {actionLoading === c.id + "-reject"
-                                            ? <><span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" /> Rejecting…</>
-                                            : "✕ Reject"
-                                        }
+                                    <button onClick={() => reject(c)}
+                                            className={`flex-1 py-2 rounded-xl text-sm font-bold border transition-all ${dark ? "border-white/10 text-gray-400 hover:text-red-400" : "border-gray-200 text-gray-500 hover:text-red-500 hover:border-red-200"}`}>
+                                        ✕ Reject
                                     </button>
                                 </div>
                             </div>
@@ -565,6 +526,7 @@ export const DoctorAccessPanel: React.FC<{
                 )
             )}
 
+            {/* CONNECTED PATIENTS */}
             {tab === "PATIENTS" && (
                 connected.length === 0 ? (
                     <div className={`text-center py-12 border rounded-2xl ${S.card(dark)}`}>
@@ -610,7 +572,3 @@ export const DoctorAccessPanel: React.FC<{
         </div>
     );
 };
-
-export { getDoctorConnections, getPatientConnections };
-function getDoctorConnections(_wallet: string): Connection[] { return []; }
-function getPatientConnections(_wallet: string): Connection[] { return []; }

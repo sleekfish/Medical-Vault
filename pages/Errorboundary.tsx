@@ -3,8 +3,6 @@ import React from 'react';
 interface State { hasError: boolean; error: Error | null; componentStack: string; }
 
 export class ErrorBoundary extends React.Component<{ children: React.ReactNode }, State> {
-    private state: { hasError: boolean; error: null; componentStack: string };
-    private props: JSX.Element;
     constructor(props: any) {
         super(props);
         this.state = { hasError: false, error: null, componentStack: '' };
@@ -56,10 +54,6 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
                 </div>
             </div>
         );
-    }
-
-    private setState(param: { componentStack: any }) {
-        
     }
 }
 

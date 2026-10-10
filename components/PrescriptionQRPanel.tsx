@@ -1,22 +1,32 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { QrCode, CheckCircle, Loader2, Copy, Download, Shield, Plus, RefreshCw } from './ui/Icons';
+import React, { useState, useEffect, useCallback } from 'react';
+import { QrCode, CheckCircle, Loader2, Copy, Download, Shield, Plus } from './ui/Icons';
 import { useToast } from '../context/ToastContext';
-import { PrescriptionQR } from '../types';
-
-const API = "http://localhost:5000";
+import {
+    createPrescription,
+    getDoctorPrescriptions,
+    getPatientPrescriptions,
+    revokePrescription,
+    FabricPrescription,
+} from '../services/prescriptionService';
+import { createNotification } from '../services/notificationService';
 
 interface PrescriptionQRProps {
     role: 'DOCTOR' | 'PATIENT';
+    /** Required when role === 'DOCTOR'. The authenticated doctor's wallet. */
+    doctorWallet?: string;
+    /**
+     * Required when role === 'DOCTOR' — the currently selected patient, used
+     * to scope the "New prescription" form and the list shown.
+     * Required when role === 'PATIENT' — the authenticated patient's own wallet.
+     */
     patientWallet?: string;
-    doctorWallet?:  string;
-    doctorName?:    string;
 }
 
-// ─── Minimal QR grid generator ────────────────────────────────────────────────
+// Minimal deterministic QR grid generator (visual mock)
 const QRGrid: React.FC<{ data: string; size?: number }> = ({ data, size = 120 }) => {
-    const cells    = 21;
+    const cells = 21;
     const cellSize = size / cells;
-    const grid     = Array.from({ length: cells }, (_, r) =>
+    const grid = Array.from({ length: cells }, (_, r) =>
         Array.from({ length: cells }, (_, c) => {
             if (r < 7 && c < 7) return (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4));
             if (r < 7 && c >= cells - 7) return (r === 0 || r === 6 || c === cells - 1 || c === cells - 7 || (r >= 2 && r <= 4 && c >= cells - 5 && c <= cells - 3));
@@ -36,136 +46,162 @@ const QRGrid: React.FC<{ data: string; size?: number }> = ({ data, size = 120 })
     );
 };
 
-const PrescriptionQRPanel: React.FC<PrescriptionQRProps> = ({
-                                                                role,
-                                                                patientWallet: propPatientWallet,
-                                                                doctorWallet:  propDoctorWallet,
-                                                                doctorName:    propDoctorName,
-                                                            }) => {
+const PrescriptionQRPanel: React.FC<PrescriptionQRProps> = ({ role, doctorWallet, patientWallet }) => {
     const { addToast } = useToast();
 
-    const [prescriptions, setPrescriptions] = useState<PrescriptionQR[]>([]);
-    const [loading,       setLoading]       = useState(true);
-    const [showForm,      setShowForm]      = useState(false);
-    const [selected,      setSelected]      = useState<PrescriptionQR | null>(null);
-    const [generating,    setGenerating]    = useState(false);
+    const [prescriptions, setPrescriptions] = useState<FabricPrescription[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [showForm, setShowForm] = useState(false);
+    const [selected, setSelected] = useState<FabricPrescription | null>(null);
+
+    // ────────────────────────────────────────────────────────────
+    // LOAD
+    // ────────────────────────────────────────────────────────────
+
+    const load = useCallback(async () => {
+        if (role === 'DOCTOR') {
+            if (!doctorWallet) return;
+            setLoading(true);
+            try {
+                const data = await getDoctorPrescriptions(doctorWallet);
+                setPrescriptions(
+                    patientWallet
+                        ? data.filter(
+                            rx =>
+                                rx.patientId?.toLowerCase() ===
+                                patientWallet.toLowerCase()
+                        )
+                        : data
+                );
+            } catch (err: any) {
+                addToast('error', err?.message || 'Could not load prescriptions.');
+            } finally {
+                setLoading(false);
+            }
+        } else {
+            if (!patientWallet) return;
+            setLoading(true);
+            try {
+                const data = await getPatientPrescriptions(patientWallet);
+                setPrescriptions(data);
+            } catch (err: any) {
+                addToast('error', err?.message || 'Could not load prescriptions.');
+            } finally {
+                setLoading(false);
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [role, doctorWallet, patientWallet]);
+
+    useEffect(() => {
+        load();
+    }, [load]);
+
+    // ────────────────────────────────────────────────────────────
+    // DOCTOR: CREATE
+    // ────────────────────────────────────────────────────────────
 
     const [form, setForm] = useState({
-        medication:    "",
-        dosage:        "",
-        duration:      "30",
-        notes:         "",
-        patientWallet: propPatientWallet || "",
+        diagnosis: '',
+        medication: '',
+        dosage: '',
+        duration: '30 days',
+        instructions: '',
+        followUpDate: '',
     });
+    const [generating, setGenerating] = useState(false);
 
-    // ── KEY FIX 1: store the resolved wallet in a ref, not state.
-    //   This means resolving the wallet never triggers a re-render,
-    //   which prevents the remount/refetch loop. ───────────────────────────────
-    const walletRef  = useRef<string>(
-        // Pre-populate immediately from props if available so first render
-        // can use it without waiting for the async effect below.
-        role === "DOCTOR"
-            ? (propDoctorWallet  || "").toLowerCase().trim()
-            : (propPatientWallet || "").toLowerCase().trim()
-    );
-    const didFetch = useRef(false);
-
-    // ── KEY FIX 2: stable fetch — useCallback with no changing deps ───────────
-    const doFetch = useCallback(async () => {
-        const wallet = walletRef.current;
-        if (!wallet) return;
-
-        setLoading(true);
-        try {
-            const endpoint = role === "PATIENT"
-                ? `${API}/prescriptions/patient/${wallet}`
-                : `${API}/prescriptions/doctor/${wallet}`;
-
-            const res  = await fetch(endpoint);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            setPrescriptions(Array.isArray(data) ? data : []);
-        } catch (e) {
-            console.warn("[Rx] Fetch failed:", e);
-            setPrescriptions([]);
-        } finally {
-            setLoading(false);
-        }
-    }, [role]); // role never changes after mount
-
-    // ── KEY FIX 3: run wallet resolution + initial fetch ONCE only ────────────
-    useEffect(() => {
-        let cancelled = false;
-
-        const init = async () => {
-            // If props already gave us a wallet, walletRef is already set above.
-            // Only fall back to MetaMask if we don't have a wallet yet.
-            if (!walletRef.current && window.ethereum) {
-                try {
-                    const accs: string[] = await window.ethereum.request({ method: "eth_accounts" });
-                    if (accs.length > 0) walletRef.current = accs[0].toLowerCase();
-                } catch {}
-            }
-            if (!walletRef.current) {
-                walletRef.current = (localStorage.getItem("vault_wallet") || "").toLowerCase();
-            }
-
-            if (!cancelled && !didFetch.current) {
-                didFetch.current = true;
-                doFetch();
-            }
-        };
-
-        init();
-        return () => { cancelled = true; };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); // ← EMPTY DEPS: runs once on mount, never again
-
-    // ── Save prescription ─────────────────────────────────────────────────────
     const generatePrescription = async () => {
-        if (!form.medication || !form.dosage || !form.patientWallet) {
-            addToast("error", "Please fill patient wallet, medication and dosage.");
+        if (!doctorWallet) {
+            addToast('error', 'Connecting wallet — try again in a moment.');
             return;
         }
-        if (!form.patientWallet.startsWith("0x")) {
-            addToast("error", "Patient wallet must start with 0x.");
+        if (!patientWallet) {
+            addToast('error', 'Select a patient first.');
+            return;
+        }
+        if (!form.diagnosis || !form.medication || !form.dosage) {
+            addToast('error', 'Please fill diagnosis, medication, and dosage.');
             return;
         }
 
         setGenerating(true);
         try {
-            const res = await fetch(`${API}/prescriptions/save`, {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    patientWallet: form.patientWallet.toLowerCase().trim(),
-                    doctorWallet:  propDoctorWallet || walletRef.current,
-                    doctorName:    propDoctorName   || "Doctor",
-                    medication:    form.medication,
-                    dosage:        form.dosage,
-                    duration:      form.duration,
-                    notes:         form.notes,
-                }),
+            await createPrescription(doctorWallet, {
+                patientWallet: patientWallet.toLowerCase(),
+                diagnosis: form.diagnosis,
+                medicines: [{ name: form.medication, dosage: form.dosage, duration: form.duration }],
+                instructions: form.instructions,
+                followUpDate: form.followUpDate,
             });
 
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const { prescription } = await res.json();
+            // Notifications are intentionally best-effort: a notification
+            // failure must never make a successful Fabric prescription look failed.
+            void createNotification({
+                recipientWallet: patientWallet.toLowerCase(),
+                actorWallet: doctorWallet,
+                type: 'PRESCRIPTION',
+                title: 'New prescription',
+                message:
+                    `${form.medication} · ${form.dosage} · ${form.duration} ` +
+                    `issued by ${doctorWallet.slice(0, 10)}…${doctorWallet.slice(-4)}.`,
+                metadata: {
+                    patientWallet: patientWallet.toLowerCase(),
+                    doctorWallet: doctorWallet.toLowerCase(),
+                    medication: form.medication,
+                    dosage: form.dosage,
+                    duration: form.duration,
+                },
+            });
 
-            setPrescriptions(prev => [prescription, ...prev]);
+            addToast('success', 'Prescription issued and visible to the patient.');
             setShowForm(false);
-            setForm({ medication: "", dosage: "", duration: "30", notes: "", patientWallet: propPatientWallet || "" });
-            addToast("success", "Prescription saved and sent to patient!");
+            setForm({ diagnosis: '', medication: '', dosage: '', duration: '30 days', instructions: '', followUpDate: '' });
+            await load();
         } catch (err: any) {
-            addToast("error", `Failed to save prescription: ${err.message}`);
+            addToast('error', err?.message || 'Could not issue prescription.');
         } finally {
             setGenerating(false);
         }
     };
 
-    const copyHash = (hash: string) => {
-        navigator.clipboard.writeText(hash);
-        addToast("success", "Transaction hash copied.");
+    const handleRevoke = async (rx: FabricPrescription) => {
+        if (!doctorWallet) return;
+        try {
+            await revokePrescription(doctorWallet, rx.prescriptionId);
+
+            void createNotification({
+                recipientWallet: rx.patientId,
+                actorWallet: doctorWallet,
+                type: 'PRESCRIPTION',
+                title: 'Prescription revoked',
+                message:
+                    `Prescription ${rx.prescriptionId.slice(0, 12)}… was revoked by ` +
+                    `${doctorWallet.slice(0, 10)}…${doctorWallet.slice(-4)}.`,
+                metadata: {
+                    patientWallet: rx.patientId,
+                    doctorWallet: doctorWallet.toLowerCase(),
+                    prescriptionId: rx.prescriptionId,
+                    action: 'REVOKED',
+                },
+            });
+
+            addToast('success', 'Prescription revoked.');
+            setSelected(null);
+            await load();
+        } catch (err: any) {
+            addToast('error', err?.message || 'Could not revoke prescription.');
+        }
     };
+
+    const copyId = (id: string) => {
+        navigator.clipboard.writeText(id);
+        addToast('success', 'Prescription ID copied.');
+    };
+
+    // ────────────────────────────────────────────────────────────
+    // RENDER
+    // ────────────────────────────────────────────────────────────
 
     return (
         <div>
@@ -175,81 +211,60 @@ const PrescriptionQRPanel: React.FC<PrescriptionQRProps> = ({
                         <QrCode size={18} className="text-sky-400" />
                     </div>
                     <div>
-                        <h3 className="text-white font-bold">
-                            {role === "PATIENT" ? "My Prescriptions" : "Prescription QR Codes"}
-                        </h3>
-                        <p className="text-xs text-gray-500">
-                            {role === "PATIENT"
-                                ? "Prescriptions from your connected doctors"
-                                : "Blockchain-signed · Tamper-proof · Pharmacist-verifiable"
-                            }
-                        </p>
+                        <h3 className="text-white font-bold">Prescriptions</h3>
+                        <p className="text-xs text-gray-500">Blockchain-signed · Tamper-proof · Pharmacist-verifiable</p>
                     </div>
                 </div>
-                <div className="flex gap-2">
+                {role === 'DOCTOR' && (
                     <button
-                        onClick={doFetch}
-                        className="flex items-center gap-1.5 text-xs border border-white/10 text-gray-400 hover:text-white px-3 py-1.5 rounded-lg transition-all"
+                        onClick={() => setShowForm(!showForm)}
+                        disabled={!patientWallet}
+                        title={!patientWallet ? 'Select a patient first' : undefined}
+                        className="flex items-center gap-1.5 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
-                        <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
+                        <Plus size={14} /> New prescription
                     </button>
-                    {role === "DOCTOR" && (
-                        <button
-                            onClick={() => setShowForm(!showForm)}
-                            className="flex items-center gap-1.5 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-sky-600 transition-all"
-                        >
-                            <Plus size={14} /> New prescription
-                        </button>
-                    )}
-                </div>
+                )}
             </div>
 
             {/* Doctor form */}
-            {role === "DOCTOR" && showForm && (
+            {role === 'DOCTOR' && showForm && (
                 <div className="mb-6 bg-white/5 rounded-xl border border-white/10 p-5">
                     <p className="text-sm font-medium text-white mb-4">New Prescription</p>
+                    <div className="mb-4">
+                        <label className="block text-xs text-gray-400 mb-1">Diagnosis</label>
+                        <input
+                            type="text"
+                            value={form.diagnosis}
+                            onChange={e => setForm(f => ({ ...f, diagnosis: e.target.value }))}
+                            placeholder="e.g. Hypertension"
+                            className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500"
+                        />
+                    </div>
                     <div className="grid grid-cols-2 gap-4 mb-4">
                         <div>
-                            <label className="block text-xs text-gray-400 mb-1">
-                                Patient wallet <span className="text-red-400">*</span>
-                            </label>
+                            <label className="block text-xs text-gray-400 mb-1">Medication</label>
                             <input
                                 type="text"
-                                value={form.patientWallet}
-                                onChange={e => setForm(f => ({ ...f, patientWallet: e.target.value }))}
-                                placeholder="0x..."
-                                className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500 font-mono"
+                                value={form.medication}
+                                onChange={e => setForm(f => ({ ...f, medication: e.target.value }))}
+                                placeholder="Drug name, strength"
+                                className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500"
                             />
                         </div>
                         <div>
-                            <label className="block text-xs text-gray-400 mb-1">Duration (days)</label>
+                            <label className="block text-xs text-gray-400 mb-1">Duration</label>
                             <select
                                 value={form.duration}
                                 onChange={e => setForm(f => ({ ...f, duration: e.target.value }))}
                                 className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500"
                             >
-                                {["7", "14", "30", "60", "90"].map(d => (
-                                    <option key={d} value={d}>{d} days</option>
-                                ))}
+                                {['7 days', '14 days', '30 days', '60 days', '90 days'].map(d => <option key={d}>{d}</option>)}
                             </select>
                         </div>
                     </div>
                     <div className="mb-4">
-                        <label className="block text-xs text-gray-400 mb-1">
-                            Medication <span className="text-red-400">*</span>
-                        </label>
-                        <input
-                            type="text"
-                            value={form.medication}
-                            onChange={e => setForm(f => ({ ...f, medication: e.target.value }))}
-                            placeholder="Drug name, strength (e.g. Atorvastatin 10mg)"
-                            className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500"
-                        />
-                    </div>
-                    <div className="mb-4">
-                        <label className="block text-xs text-gray-400 mb-1">
-                            Dosage instructions <span className="text-red-400">*</span>
-                        </label>
+                        <label className="block text-xs text-gray-400 mb-1">Dosage instructions</label>
                         <input
                             type="text"
                             value={form.dosage}
@@ -258,15 +273,26 @@ const PrescriptionQRPanel: React.FC<PrescriptionQRProps> = ({
                             className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500"
                         />
                     </div>
-                    <div className="mb-4">
-                        <label className="block text-xs text-gray-400 mb-1">Notes (optional)</label>
-                        <input
-                            type="text"
-                            value={form.notes}
-                            onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
-                            placeholder="Additional instructions..."
-                            className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500"
-                        />
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1">Additional instructions (optional)</label>
+                            <input
+                                type="text"
+                                value={form.instructions}
+                                onChange={e => setForm(f => ({ ...f, instructions: e.target.value }))}
+                                placeholder="e.g. Avoid alcohol"
+                                className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-sky-500"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1">Follow-up date (optional)</label>
+                            <input
+                                type="date"
+                                value={form.followUpDate}
+                                onChange={e => setForm(f => ({ ...f, followUpDate: e.target.value }))}
+                                className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500"
+                            />
+                        </div>
                     </div>
                     <div className="flex gap-3">
                         <button
@@ -275,119 +301,120 @@ const PrescriptionQRPanel: React.FC<PrescriptionQRProps> = ({
                             className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-60 transition-all"
                         >
                             {generating ? <Loader2 size={14} className="animate-spin" /> : <Shield size={14} />}
-                            {generating ? "Saving…" : "Save & send to patient"}
+                            {generating ? 'Writing to chain...' : 'Sign & notarize on-chain'}
                         </button>
-                        <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-gray-500 hover:text-white">
-                            Cancel
-                        </button>
+                        <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-gray-500 hover:text-white">Cancel</button>
                     </div>
                 </div>
             )}
 
-            {/* Loading */}
-            {loading && (
-                <div className="flex items-center justify-center py-12 text-gray-500">
-                    <RefreshCw size={20} className="animate-spin mr-2" />
-                    <span className="text-sm">Loading prescriptions…</span>
+            {/* List */}
+            {loading ? (
+                <div className="text-center py-10">
+                    <Loader2 size={20} className="animate-spin mx-auto text-sky-400" />
                 </div>
-            )}
-
-            {/* Empty */}
-            {!loading && prescriptions.length === 0 && (
-                <div className="text-center py-12 text-gray-500">
-                    <QrCode size={40} className="mx-auto mb-3 opacity-20" />
-                    <p className="text-sm font-medium">
-                        {role === "PATIENT"
-                            ? "No prescriptions yet. Your doctor will send them here."
-                            : "No prescriptions issued yet. Click '+ New prescription' to create one."
-                        }
+            ) : prescriptions.length === 0 ? (
+                <div className="text-center py-10 border border-dashed border-white/10 rounded-xl">
+                    <p className="text-sm text-gray-500">
+                        {role === 'PATIENT'
+                            ? 'No prescriptions yet.'
+                            : patientWallet
+                                ? 'No prescriptions issued to this patient yet.'
+                                : 'Select a patient to view or issue prescriptions.'}
                     </p>
                 </div>
-            )}
-
-            {/* Grid */}
-            {!loading && prescriptions.length > 0 && (
+            ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {prescriptions.map(rx => (
-                        <div
-                            key={rx.id}
-                            onClick={() => setSelected(rx)}
-                            className="bg-black border border-gray-800 rounded-xl p-4 cursor-pointer hover:border-sky-500/50 transition-all group"
-                        >
-                            <div className="flex items-start justify-between mb-3">
-                                <div className="min-w-0 flex-1">
-                                    <p className="text-white text-sm font-medium truncate">{rx.medication}</p>
-                                    <p className="text-xs text-gray-500 mt-0.5">{rx.dosage}</p>
-                                    {role === "PATIENT" && <p className="text-xs text-sky-400 mt-0.5">{rx.doctorName}</p>}
-                                    {role === "DOCTOR"  && <p className="text-xs text-gray-600 mt-0.5 font-mono truncate">{rx.patientWallet?.slice(0, 18)}…</p>}
+                    {prescriptions.map(rx => {
+                        const primary = rx.medicines[0];
+                        return (
+                            <div
+                                key={rx.prescriptionId}
+                                onClick={() => setSelected(rx)}
+                                className="bg-black border border-gray-800 rounded-xl p-4 cursor-pointer hover:border-sky-500/50 transition-all group"
+                            >
+                                <div className="flex items-start justify-between mb-3">
+                                    <div>
+                                        <p className="text-white text-sm font-medium">{primary?.name}</p>
+                                        <p className="text-xs text-gray-500 mt-0.5">{primary?.dosage}</p>
+                                    </div>
+                                    <span className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-mono ${rx.status === 'ACTIVE' ? 'text-green-400 bg-green-500/10' : 'text-red-400 bg-red-500/10'}`}>
+                                        <CheckCircle size={10} /> {rx.status === 'ACTIVE' ? 'Active' : 'Revoked'}
+                                    </span>
                                 </div>
-                                <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-mono text-green-400 bg-green-500/10 flex-shrink-0 ml-2">
-                                    <CheckCircle size={10} /> Verified
-                                </span>
+                                <div className="flex items-center justify-between text-xs text-gray-500">
+                                    <span>{new Date(rx.issuedAt).toLocaleDateString()} · {primary?.duration}</span>
+                                    <span className="text-sky-400 group-hover:underline">View →</span>
+                                </div>
                             </div>
-                            <div className="flex items-center justify-between text-xs text-gray-500">
-                                <span>{rx.issuedDate} · {rx.duration}</span>
-                                <span className="text-sky-400 group-hover:underline">View QR →</span>
-                            </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
 
-            {/* QR Modal */}
+            {/* Detail Modal */}
             {selected && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-                    onClick={() => setSelected(null)}
-                >
-                    <div
-                        className="bg-[#0f0f0f] border border-white/10 rounded-2xl p-6 w-80 shadow-2xl"
-                        onClick={e => e.stopPropagation()}
-                    >
-                        <p className="text-white font-bold mb-1">{selected.medication}</p>
-                        <p className="text-xs text-gray-500 mb-4">{selected.doctorName} · {selected.issuedDate}</p>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setSelected(null)}>
+                    <div className="bg-[#0f0f0f] border border-white/10 rounded-2xl p-6 w-80 shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-start justify-between mb-1">
+                            <p className="text-white font-bold">{selected.medicines[0]?.name}</p>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono flex-shrink-0 ${selected.status === 'ACTIVE' ? 'text-green-400 bg-green-500/10' : 'text-red-400 bg-red-500/10'}`}>
+                                {selected.status === 'ACTIVE' ? 'Active' : 'Revoked'}
+                            </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mb-4">{selected.diagnosis} · {new Date(selected.issuedAt).toLocaleDateString()}</p>
 
                         <div className="flex justify-center mb-4">
                             <div className="bg-black p-3 rounded-xl border border-white/10">
-                                <QRGrid data={selected.txHash + selected.id} size={140} />
+                                <QRGrid data={selected.prescriptionId} size={140} />
                             </div>
                         </div>
 
                         <div className="space-y-2 mb-4">
-                            {[
-                                { label: "Dosage",      value: selected.dosage },
-                                { label: "Duration",    value: selected.duration },
-                                { label: "Valid until", value: selected.expiryDate },
-                                ...(selected.notes ? [{ label: "Notes", value: selected.notes }] : []),
-                            ].map(({ label, value }) => (
-                                <div key={label} className="flex justify-between text-xs">
-                                    <span className="text-gray-500">{label}</span>
-                                    <span className="text-white text-right max-w-[60%]">{value}</span>
+                            {selected.medicines.map((m, i) => (
+                                <div key={i} className="flex justify-between text-xs">
+                                    <span className="text-gray-500">{m.name}</span>
+                                    <span className="text-white">{m.dosage} · {m.duration}</span>
                                 </div>
                             ))}
+                            {selected.instructions && (
+                                <div className="flex justify-between text-xs">
+                                    <span className="text-gray-500">Instructions</span>
+                                    <span className="text-white text-right">{selected.instructions}</span>
+                                </div>
+                            )}
+                            {selected.followUpDate && (
+                                <div className="flex justify-between text-xs">
+                                    <span className="text-gray-500">Follow-up</span>
+                                    <span className="text-white">{selected.followUpDate}</span>
+                                </div>
+                            )}
                         </div>
 
                         <div className="bg-white/5 rounded-lg p-2 flex items-center gap-2 mb-4">
                             <Shield size={12} className="text-green-400 flex-shrink-0" />
-                            <p className="text-[10px] font-mono text-gray-500 truncate">{selected.txHash}</p>
-                            <button onClick={() => copyHash(selected.txHash)} className="ml-auto flex-shrink-0 text-gray-500 hover:text-white">
+                            <p className="text-[10px] font-mono text-gray-500 truncate">{selected.prescriptionId}</p>
+                            <button onClick={() => copyId(selected.prescriptionId)} className="ml-auto flex-shrink-0 text-gray-500 hover:text-white">
                                 <Copy size={12} />
                             </button>
                         </div>
 
                         <div className="flex gap-2">
                             <button
-                                onClick={() => addToast("info", "QR download coming soon.")}
+                                onClick={() => { addToast('info', 'QR download feature coming soon.'); }}
                                 className="flex-1 flex items-center justify-center gap-1.5 bg-sky-500 text-white py-2 rounded-lg text-xs font-medium hover:bg-sky-600"
                             >
                                 <Download size={13} /> Download QR
                             </button>
-                            <button
-                                onClick={() => setSelected(null)}
-                                className="px-4 py-2 text-xs text-gray-500 hover:text-white border border-white/10 rounded-lg"
-                            >
-                                Close
-                            </button>
+                            {role === 'DOCTOR' && selected.status === 'ACTIVE' && (
+                                <button
+                                    onClick={() => handleRevoke(selected)}
+                                    className="px-3 py-2 text-xs font-medium rounded-lg border text-red-400 border-red-500/30 hover:bg-red-500/10"
+                                >
+                                    Revoke
+                                </button>
+                            )}
+                            <button onClick={() => setSelected(null)} className="px-4 py-2 text-xs text-gray-500 hover:text-white border border-white/10 rounded-lg">Close</button>
                         </div>
                     </div>
                 </div>
